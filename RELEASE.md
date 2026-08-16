@@ -1,5 +1,9 @@
 # Lilo release guide
 
+## Platform status
+
+Windows and Linux x86-64 are published binary platforms. Linux archives are tested on current Arch Linux and Ubuntu 22.04 or newer. Windows and Ubuntu remain mandatory CI targets for ongoing development. macOS integration, release signing and notarisation are not currently claimed.
+
 ## Install on Windows
 
 The preferred installation method is WinGet:
@@ -12,9 +16,19 @@ Until the initial package is accepted by the WinGet community repository, or for
 
 Lilo creates its default vault as `LiloVault` in the user's Documents directory. The active path is visible and can be changed immediately in **Settings → Storage**.
 
+## Install on Linux
+
+1. Download the Ubuntu or Arch `Lilo-<version>-<platform>-x86_64.tar.gz` archive and its `.sha256` file.
+2. Run `sha256sum -c <archive>.sha256` in the download directory.
+3. Extract the complete archive.
+4. Install `Lilo` to a stable user-owned location such as `~/.local/bin/Lilo`.
+5. Launch the installed executable before enabling autostart.
+
+The Ubuntu artifact requires Ubuntu 22.04 or newer. The Arch artifact targets an up-to-date rolling installation. Both archives contain an unsigned dynamically linked x86-64 executable rather than a native distribution package.
+
 ## Update
 
-Update a WinGet installation with `winget upgrade --id HellterEnjoy.Lilo --exact`, or run the newer Setup.exe over the existing installation. Portable users can still replace the files from the newer ZIP. The executable is separate from the vault, so updating or uninstalling the application does not remove notes or settings. Keep a vault export before an update when the data matters.
+Update a WinGet installation with `winget upgrade --id HellterEnjoy.Lilo --exact`, or run the newer Setup.exe over the existing Windows installation. Portable Windows users can replace the files from the newer ZIP. On Linux, replace the installed executable while preserving its path so an existing autostart entry remains valid. The executable is separate from the vault, so updating or uninstalling the application does not remove notes or settings. Keep a vault export before an update when the data matters.
 
 ## Backup and recovery
 
@@ -36,11 +50,11 @@ cargo clippy --all-targets -- -D warnings
 powershell -ExecutionPolicy Bypass -File .\scripts\package-windows.ps1
 ```
 
-The script performs a locked release build and creates the Inno Setup installer, portable ZIP, and their SHA-256 checksums under `dist/`. Release artifacts are intentionally ignored by Git.
+The script performs a locked release build and creates the Inno Setup installer, portable ZIP, and their SHA-256 checksums under `dist/`. Linux artifacts are built and tested in clean matching distribution containers, packaged with the same documentation, and accompanied by SHA-256 checksums. Release artifacts are intentionally ignored by Git.
 
 ## Publishing releases and WinGet updates
 
-Pushing a `v<version>` tag runs `.github/workflows/release.yml`. The workflow verifies that the tag matches `Cargo.toml`, runs the tests, builds all Windows artifacts, and creates or updates the GitHub release.
+Pushing a `v<version>` tag runs `.github/workflows/release.yml`. The workflow verifies that the tag matches `Cargo.toml`, runs the tests, builds all Windows artifacts, and creates or updates the GitHub release. Verified Linux archives are then uploaded to the same release.
 
 The first WinGet version must be submitted once from the checked-in manifests:
 
