@@ -92,6 +92,73 @@ pub fn show_editor(ui: &mut Ui, text: &mut String, id: Id, body_size: f32) -> Te
     output
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutlineItem {
+    pub level: usize,
+    pub title: String,
+    pub char_index: usize,
+    pub line_index: usize,
+}
+
+/// Extracts markdown outline headers (#, ##, ###) while strictly ignoring code blocks.
+pub fn extract_outline(text: &str) -> Vec<OutlineItem> {
+    let mut items = Vec::new();
+    let mut inside_code_block = false;
+    let mut char_acc = 0;
+
+    for (line_index, raw_line) in text.split_inclusive('\n').enumerate() {
+        let line = raw_line
+            .strip_suffix('\n')
+            .unwrap_or(raw_line)
+            .trim_end_matches('\r');
+        let trimmed = line.trim();
+
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            inside_code_block = !inside_code_block;
+            char_acc += raw_line.chars().count();
+            continue;
+        }
+
+        if !inside_code_block {
+            let hash_count = trimmed.bytes().take_while(|&b| b == b'#').count();
+            if (1..=6).contains(&hash_count) {
+                let rest = &trimmed[hash_count..];
+                if rest.starts_with(' ') || rest.is_empty() {
+                    let title = rest.trim().to_owned();
+                    if !title.is_empty() {
+                        items.push(OutlineItem {
+                            level: hash_count,
+                            title,
+                            char_index: char_acc,
+                            line_index,
+                        });
+                    }
+                }
+            }
+        }
+
+        char_acc += raw_line.chars().count();
+    }
+
+    items
+}
+
+/// Counts total words and characters in text.
+pub fn count_words_and_chars(text: &str) -> (usize, usize) {
+    let words = text.split_whitespace().count();
+    let chars = text.chars().count();
+    (words, chars)
+}
+
+pub fn set_cursor_char_index(ctx: &Context, id: Id, char_index: usize) {
+    let mut state = TextEditState::load(ctx, id).unwrap_or_default();
+    state
+        .cursor
+        .set_char_range(Some(CCursorRange::one(CCursor::new(char_index))));
+    state.store(ctx, id);
+    ctx.memory_mut(|memory| memory.request_focus(id));
+}
+
 pub fn apply_command(ctx: &Context, id: Id, text: &mut String, command: MarkdownCommand) -> bool {
     let mut state = TextEditState::load(ctx, id).unwrap_or_default();
     let range = state.cursor.char_range().unwrap_or_else(|| {
@@ -431,6 +498,7 @@ fn format(family: FontFamily, size: f32, color: Color32) -> TextFormat {
     TextFormat {
         font_id: FontId::new(size, family),
         color,
+        line_height: Some(size * 1.55),
         ..Default::default()
     }
 }
@@ -762,5 +830,49 @@ mod tests {
 
         assert_eq!(job.text, source);
         assert_eq!(job.sections.len(), 1);
+    }
+
+    #[test]
+    fn extract_outline_ignores_code_blocks_and_tracks_levels() {
+        let text = r#"# Main Header
+
+Some intro text here.
+
+```rust
+# This is a comment in code, not a header
+fn main() {}
+```
+
+## Section 1: Intro
+Content
+
+### Subsection 1.1
+More content
+
+~~~python
+# Another code comment
+~~~
+
+## Section 2: Details
+Final thoughts"#;
+
+        let outline = extract_outline(text);
+        assert_eq!(outline.len(), 4);
+        assert_eq!(outline[0].level, 1);
+        assert_eq!(outline[0].title, "Main Header");
+        assert_eq!(outline[1].level, 2);
+        assert_eq!(outline[1].title, "Section 1: Intro");
+        assert_eq!(outline[2].level, 3);
+        assert_eq!(outline[2].title, "Subsection 1.1");
+        assert_eq!(outline[3].level, 2);
+        assert_eq!(outline[3].title, "Section 2: Details");
+    }
+
+    #[test]
+    fn count_words_and_chars_handles_unicode() {
+        let text = "Привет, мир! 🦀\nTwo words.";
+        let (words, chars) = count_words_and_chars(text);
+        assert_eq!(words, 5);
+        assert_eq!(chars, text.chars().count());
     }
 }

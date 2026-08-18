@@ -1,11 +1,17 @@
+use crate::commands::{self, CommandAction, CommandPaletteState};
+use crate::daily::LocalDateService;
 use crate::folders;
 use crate::graph;
 use crate::links::{self, LinkIndex, LinkResolution};
 use crate::markdown;
 use crate::platform;
+use crate::quick_capture::{self, QuickCaptureState, QuickCaptureSubmission};
+use crate::search::SearchQuery;
 use crate::storage::{
-    self, AppData, AppSettings, Note, NoteSort, StoragePaths, ThemeChoice, ToolbarPlacement,
+    self, AppData, AppSettings, Note, NoteSort, QuickCaptureTarget, StoragePaths, ThemeChoice,
+    ToolbarPlacement,
 };
+use crate::templates::TemplateEngine;
 use crate::ui_style::{self, Icon};
 use eframe::egui;
 use std::collections::{HashMap, HashSet};
@@ -31,7 +37,6 @@ pub(crate) struct WidgetApp {
 
     view: AppView,
     search_query: String,
-    normalized_search_query: String,
     focus_search: bool,
     focus_editor: bool,
     show_new_folder_input: bool,
@@ -54,6 +59,15 @@ pub(crate) struct WidgetApp {
     new_tag: String,
     new_alias: String,
     note_details_open: bool,
+
+    // 0.1.1 & Daily Workflow Foundation
+    command_palette_state: CommandPaletteState,
+    quick_capture_state: QuickCaptureState,
+    template_selector_open: bool,
+    template_selector_for_new_note: bool,
+    pending_folder_delete: Option<PathBuf>,
+    pending_folder_notes_count: usize,
+    pending_cursor_char_index: Option<(Uuid, usize)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -66,6 +80,7 @@ enum AppView {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 enum EffectiveToolbarPlacement {
     Top,
     Left,
@@ -95,18 +110,23 @@ struct NotesListActions {
 fn folder_has_visible_notes(
     folder: &folders::FolderNode,
     notes: &HashMap<Uuid, &Note>,
-    normalized_query: &str,
+    query: &SearchQuery,
+    outgoing_links_by_id: &HashMap<Uuid, Vec<String>>,
 ) -> bool {
-    normalized_query.is_empty()
-        || folder.note_ids.iter().any(|id| {
-            notes
+    if query.is_empty() {
+        return true;
+    }
+    folder.note_ids.iter().any(|id| {
+        notes.get(id).is_some_and(|note| {
+            let links = outgoing_links_by_id
                 .get(id)
-                .is_some_and(|note| note.search_text.contains(normalized_query))
+                .map_or(&[] as &[String], Vec::as_slice);
+            query.matches_note(note, &folder.relative_path, links)
         })
-        || folder
-            .folders
-            .iter()
-            .any(|child| folder_has_visible_notes(child, notes, normalized_query))
+    }) || folder
+        .folders
+        .iter()
+        .any(|child| folder_has_visible_notes(child, notes, query, outgoing_links_by_id))
 }
 
 fn show_note_row(
@@ -182,14 +202,15 @@ fn show_folder_node(
     ui: &mut egui::Ui,
     folder: &folders::FolderNode,
     notes: &HashMap<Uuid, &Note>,
-    normalized_query: &str,
+    query: &SearchQuery,
+    outgoing_links_by_id: &HashMap<Uuid, Vec<String>>,
     selected_note_id: Option<Uuid>,
     selected_folder: &Path,
     collapsed_folders: &[PathBuf],
     note_sort: NoteSort,
     actions: &mut NotesListActions,
 ) {
-    if !folder_has_visible_notes(folder, notes, normalized_query) {
+    if !folder_has_visible_notes(folder, notes, query, outgoing_links_by_id) {
         return;
     }
 
@@ -210,7 +231,7 @@ fn show_folder_node(
                     actions.rename_folder = Some(folder.relative_path.clone());
                     ui.close();
                 }
-                if ui.button("Delete empty folder").clicked() {
+                if ui.button("Delete folder...").clicked() {
                     actions.delete_folder = Some(folder.relative_path.clone());
                     ui.close();
                 }
@@ -228,7 +249,8 @@ fn show_folder_node(
                 ui,
                 child,
                 notes,
-                normalized_query,
+                query,
+                outgoing_links_by_id,
                 selected_note_id,
                 selected_folder,
                 collapsed_folders,
@@ -254,9 +276,10 @@ fn show_folder_node(
             let Some(note) = notes.get(&note_id) else {
                 continue;
             };
-            if !note.pinned
-                && (normalized_query.is_empty() || note.search_text.contains(normalized_query))
-            {
+            let links = outgoing_links_by_id
+                .get(&note.id)
+                .map_or(&[] as &[String], Vec::as_slice);
+            if !note.pinned && query.matches_note(note, &folder.relative_path, links) {
                 show_note_row(ui, note, selected_note_id, actions);
             }
         }
@@ -299,6 +322,15 @@ fn shortcut_pressed(ctx: &egui::Context, shortcut: &str) -> bool {
         "X" => egui::Key::X,
         "Y" => egui::Key::Y,
         "Z" => egui::Key::Z,
+        "0" => egui::Key::Num0,
+        "1" => egui::Key::Num1,
+        "2" => egui::Key::Num2,
+        "3" => egui::Key::Num3,
+        "4" => egui::Key::Num4,
+        "5" => egui::Key::Num5,
+        "F11" => egui::Key::F11,
+        "=" | "+" => egui::Key::Plus,
+        "-" => egui::Key::Minus,
         _ => return false,
     };
     ctx.input(|input| {
@@ -328,15 +360,6 @@ impl WidgetApp {
             eprintln!("Storage warning: {warning}");
         }
 
-        let storage_message = if loaded.migrated_notes > 0 {
-            Some(format!(
-                "Migrated {} note(s) to Markdown",
-                loaded.migrated_notes
-            ))
-        } else {
-            loaded.warnings.first().cloned()
-        };
-
         let vault_path_buffer = loaded.settings.vault_path.display().to_string();
         let graph_state = graph::GraphState::restore(&loaded.settings.graph_node_offsets);
         let vault_snapshot = storage::vault_snapshot(&loaded.paths.notes_dir).unwrap_or_default();
@@ -353,13 +376,12 @@ impl WidgetApp {
             dirty_note_ids: HashSet::new(),
             pending_title_rename_ids: HashSet::new(),
             last_edit_at: None,
-            storage_message,
+            storage_message: None,
             link_index,
             folder_paths: loaded.folder_paths,
             graph_state,
             view: AppView::Editor,
             search_query: String::new(),
-            normalized_search_query: String::new(),
             focus_search: false,
             focus_editor: false,
             show_new_folder_input: false,
@@ -382,6 +404,14 @@ impl WidgetApp {
             new_tag: String::new(),
             new_alias: String::new(),
             note_details_open: false,
+
+            command_palette_state: CommandPaletteState::default(),
+            quick_capture_state: QuickCaptureState::default(),
+            template_selector_open: false,
+            template_selector_for_new_note: true,
+            pending_folder_delete: None,
+            pending_folder_notes_count: 0,
+            pending_cursor_char_index: None,
         }
     }
 
@@ -394,7 +424,11 @@ impl WidgetApp {
         }
     }
 
+    #[allow(dead_code)]
     fn effective_toolbar_placement(&self, width: f32) -> EffectiveToolbarPlacement {
+        if self.settings.zen_mode {
+            return EffectiveToolbarPlacement::Top;
+        }
         if width < 340.0 {
             return EffectiveToolbarPlacement::Top;
         }
@@ -416,6 +450,7 @@ impl WidgetApp {
         self.focus_editor = view == AppView::Editor;
     }
 
+    #[allow(dead_code)]
     fn show_navigation_buttons(&mut self, ui: &mut egui::Ui, expanded: bool) {
         for (view, icon, label) in [
             (AppView::Editor, Icon::Editor, "Editor"),
@@ -430,11 +465,13 @@ impl WidgetApp {
         }
     }
 
+    #[allow(dead_code)]
     fn show_toolbar_menu(&mut self, ui: &mut egui::Ui, include_hidden_views: bool) {
         let before = (
             self.settings.toolbar_placement,
             self.settings.toolbar_expanded,
             self.settings.floating_toolbar_vertical,
+            self.settings.zen_mode,
         );
         let mut requested_view = None;
         ui.menu_button("...", |ui| {
@@ -449,6 +486,21 @@ impl WidgetApp {
                 }
                 ui.separator();
             }
+            if ui.button("Command Palette (Ctrl+P)").clicked() {
+                self.command_palette_state.open();
+                ui.close();
+            }
+            if ui.button("Quick Capture (Ctrl+Shift+C)").clicked() {
+                self.quick_capture_state.open();
+                ui.close();
+            }
+            if ui.button("Today's Note (Alt+D)").clicked() {
+                self.open_or_create_daily_note(0);
+                ui.close();
+            }
+            ui.separator();
+            ui.checkbox(&mut self.settings.zen_mode, "Zen / Writing mode (F11)");
+            ui.separator();
             ui.label("Toolbar position");
             ui.selectable_value(
                 &mut self.settings.toolbar_placement,
@@ -502,6 +554,7 @@ impl WidgetApp {
             self.settings.toolbar_placement,
             self.settings.toolbar_expanded,
             self.settings.floating_toolbar_vertical,
+            self.settings.zen_mode,
         );
         if before != after {
             self.save_settings();
@@ -614,6 +667,265 @@ impl WidgetApp {
         self.save_settings();
     }
 
+    // Daily Notes Management
+    pub fn open_or_create_daily_note(&mut self, offset_days: i64) {
+        let target_date = LocalDateService::today() + chrono::Duration::days(offset_days);
+        let (subfolder, note_title) = match LocalDateService::format_daily_path(
+            &self.settings.daily_note_format,
+            target_date,
+        ) {
+            Ok(res) => res,
+            Err(err) => {
+                self.storage_message = Some(format!("Daily note format error: {err}"));
+                return;
+            }
+        };
+
+        let target_folder_rel = self.settings.daily_notes_folder.join(&subfolder);
+        let target_folder_abs =
+            match storage::ensure_note_folder(&self.storage_paths.notes_dir, &target_folder_rel) {
+                Ok(dir) => dir,
+                Err(err) => {
+                    self.storage_message = Some(format!("Failed to ensure daily folder: {err}"));
+                    return;
+                }
+            };
+
+        // Check if note already exists
+        let existing_id = self
+            .data
+            .notes
+            .iter()
+            .find(|n| {
+                if let Ok(rel) = n.file_path.strip_prefix(&self.storage_paths.notes_dir)
+                    && let Some(parent) = rel.parent()
+                {
+                    return parent == target_folder_rel
+                        && n.title.eq_ignore_ascii_case(&note_title);
+                }
+                n.title.eq_ignore_ascii_case(&note_title)
+            })
+            .map(|n| n.id);
+
+        if let Some(id) = existing_id {
+            self.open_note(id);
+            return;
+        }
+
+        // Create new daily note from template
+        let template_text = if !self.settings.default_daily_template.is_empty() {
+            TemplateEngine::load_template(
+                &self.storage_paths.notes_dir,
+                &self.settings.templates_folder,
+                &self.settings.default_daily_template,
+            )
+            .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        let (expanded_content, cursor_pos) =
+            TemplateEngine::expand(&template_text, &note_title, LocalDateService::now());
+
+        let id = self.data.create_note_named(&target_folder_abs, &note_title);
+        if let Some(note) = self.data.notes.iter_mut().find(|n| n.id == id) {
+            note.content = expanded_content;
+            note.refresh_search_text();
+        }
+
+        if let Some(pos) = cursor_pos {
+            self.pending_cursor_char_index = Some((id, pos));
+        }
+
+        self.save_note_now(id);
+        self.link_index = LinkIndex::build(&self.data.notes, &self.storage_paths.notes_dir);
+        self.open_note(id);
+        self.storage_message = Some(format!(
+            "Opened daily note for {}",
+            target_date.format("%Y-%m-%d")
+        ));
+    }
+
+    // Markdown Templates Execution
+    pub fn create_note_from_template(&mut self, template_name: &str) {
+        let Some(template_text) = TemplateEngine::load_template(
+            &self.storage_paths.notes_dir,
+            &self.settings.templates_folder,
+            template_name,
+        ) else {
+            self.storage_message = Some(format!("Template '{template_name}' not found"));
+            return;
+        };
+
+        let note_directory = match storage::ensure_note_folder(
+            &self.storage_paths.notes_dir,
+            &self.settings.selected_folder,
+        ) {
+            Ok(directory) => directory,
+            Err(error) => {
+                self.storage_message = Some(format!("Failed to open note folder: {error}"));
+                return;
+            }
+        };
+
+        let (expanded, cursor_pos) =
+            TemplateEngine::expand(&template_text, "Untitled", LocalDateService::now());
+        let id = self.data.create_note(&note_directory);
+
+        if let Some(note) = self.data.notes.iter_mut().find(|n| n.id == id) {
+            note.content = expanded;
+            note.refresh_search_text();
+        }
+
+        if let Some(pos) = cursor_pos {
+            self.pending_cursor_char_index = Some((id, pos));
+        }
+
+        self.save_note_now(id);
+        self.link_index = LinkIndex::build(&self.data.notes, &self.storage_paths.notes_dir);
+        self.open_note(id);
+        self.storage_message = Some(format!("Created note from template '{template_name}'"));
+    }
+
+    pub fn insert_template_into_active_note(&mut self, template_name: &str) {
+        let Some(template_text) = TemplateEngine::load_template(
+            &self.storage_paths.notes_dir,
+            &self.settings.templates_folder,
+            template_name,
+        ) else {
+            self.storage_message = Some(format!("Template '{template_name}' not found"));
+            return;
+        };
+
+        let Some(selected_id) = self.data.selected_note_id else {
+            return;
+        };
+
+        let title = self
+            .data
+            .selected_note()
+            .map(|n| n.title.clone())
+            .unwrap_or_default();
+        let (expanded, _) = TemplateEngine::expand(&template_text, &title, LocalDateService::now());
+
+        if let Some(note) = self.data.notes.iter_mut().find(|n| n.id == selected_id) {
+            if !note.content.is_empty() && !note.content.ends_with('\n') {
+                note.content.push('\n');
+            }
+            note.content.push_str(&expanded);
+            note.mark_as_updated();
+            self.link_index.refresh_note_content(note);
+            self.mark_note_dirty(selected_id);
+            self.storage_message = Some(format!("Inserted template '{template_name}'"));
+        }
+    }
+
+    // Quick Capture with Buffer Synchronization
+    pub fn apply_quick_capture(&mut self, submission: QuickCaptureSubmission) {
+        let entry = quick_capture::format_capture_entry(&submission.text, submission.timestamp);
+
+        match self.settings.quick_capture_target {
+            QuickCaptureTarget::DailyNote => {
+                let target_date = LocalDateService::today();
+                let (subfolder, note_title) = match LocalDateService::format_daily_path(
+                    &self.settings.daily_note_format,
+                    target_date,
+                ) {
+                    Ok(res) => res,
+                    Err(_) => (PathBuf::new(), target_date.format("%Y-%m-%d").to_string()),
+                };
+
+                let target_folder_rel = self.settings.daily_notes_folder.join(&subfolder);
+                let target_folder_abs =
+                    storage::ensure_note_folder(&self.storage_paths.notes_dir, &target_folder_rel)
+                        .unwrap_or_else(|_| self.storage_paths.notes_dir.clone());
+
+                let existing_id = self
+                    .data
+                    .notes
+                    .iter()
+                    .find(|n| n.title.eq_ignore_ascii_case(&note_title))
+                    .map(|n| n.id);
+
+                let note_id = if let Some(id) = existing_id {
+                    id
+                } else {
+                    let id = self.data.create_note_named(&target_folder_abs, &note_title);
+                    if let Some(note) = self.data.notes.iter_mut().find(|n| n.id == id) {
+                        note.content = format!("# {}\n\n", note_title);
+                    }
+                    id
+                };
+
+                let target_title =
+                    if let Some(note) = self.data.notes.iter_mut().find(|n| n.id == note_id) {
+                        if !note.content.is_empty() && !note.content.ends_with('\n') {
+                            note.content.push('\n');
+                        }
+                        note.content.push_str(&entry);
+                        note.mark_as_updated();
+                        self.link_index.refresh_note_content(note);
+                        note.title.clone()
+                    } else {
+                        String::new()
+                    };
+
+                self.save_note_now(note_id);
+                self.storage_message = Some(format!("Captured to daily note ({target_title})"));
+            }
+            QuickCaptureTarget::Inbox => {
+                let inbox_title = "Inbox";
+                let existing_id = self
+                    .data
+                    .notes
+                    .iter()
+                    .find(|n| n.title.eq_ignore_ascii_case(inbox_title))
+                    .map(|n| n.id);
+
+                let note_id = if let Some(id) = existing_id {
+                    id
+                } else {
+                    let id = self
+                        .data
+                        .create_note_named(&self.storage_paths.notes_dir, inbox_title);
+                    if let Some(note) = self.data.notes.iter_mut().find(|n| n.id == id) {
+                        note.content = format!("# {}\n\n", inbox_title);
+                    }
+                    id
+                };
+
+                if let Some(note) = self.data.notes.iter_mut().find(|n| n.id == note_id) {
+                    if !note.content.is_empty() && !note.content.ends_with('\n') {
+                        note.content.push('\n');
+                    }
+                    note.content.push_str(&entry);
+                    note.mark_as_updated();
+                    self.link_index.refresh_note_content(note);
+                }
+
+                self.save_note_now(note_id);
+                self.storage_message = Some("Captured to Inbox".to_owned());
+            }
+            QuickCaptureTarget::NewNote => {
+                let note_directory = storage::ensure_note_folder(
+                    &self.storage_paths.notes_dir,
+                    &self.settings.selected_folder,
+                )
+                .unwrap_or_else(|_| self.storage_paths.notes_dir.clone());
+
+                let title = format!("Thought {}", submission.timestamp.format("%Y-%m-%d %H%M%S"));
+                let id = self.data.create_note_named(&note_directory, &title);
+                if let Some(note) = self.data.notes.iter_mut().find(|n| n.id == id) {
+                    note.content = format!("# {}\n\n{}", title, entry);
+                    note.refresh_search_text();
+                }
+                self.save_note_now(id);
+                self.link_index = LinkIndex::build(&self.data.notes, &self.storage_paths.notes_dir);
+                self.storage_message = Some(format!("Created capture note '{title}'"));
+            }
+        }
+    }
+
     fn create_folder_from_input(&mut self) {
         match storage::create_note_folder(
             &self.storage_paths.notes_dir,
@@ -721,18 +1033,28 @@ impl WidgetApp {
     }
 
     fn delete_folder(&mut self, path: &Path) {
-        match storage::delete_empty_folder(&self.storage_paths.notes_dir, path) {
-            Ok(()) => {
-                self.folder_paths.retain(|folder| folder != path);
+        match storage::delete_folder_with_trash(
+            &self.storage_paths.notes_dir,
+            &self.storage_paths.trash_dir,
+            path,
+            &self.data.notes,
+        ) {
+            Ok(trashed_ids) => {
+                for id in trashed_ids {
+                    self.data.remove_note(id);
+                }
+                self.folder_paths.retain(|folder| !folder.starts_with(path));
                 self.settings
                     .collapsed_folders
-                    .retain(|folder| folder != path);
-                if self.settings.selected_folder == path {
+                    .retain(|folder| !folder.starts_with(path));
+                if self.settings.selected_folder.starts_with(path) {
                     self.settings.selected_folder = PathBuf::new();
                 }
+                self.link_index = LinkIndex::build(&self.data.notes, &self.storage_paths.notes_dir);
                 self.vault_snapshot =
                     storage::vault_snapshot(&self.storage_paths.notes_dir).unwrap_or_default();
                 self.save_settings();
+                self.storage_message = Some(format!("Folder '{}' moved to Trash", path.display()));
             }
             Err(error) => self.storage_message = Some(format!("Failed to delete folder: {error}")),
         }
@@ -773,21 +1095,36 @@ impl WidgetApp {
         self.last_external_sync = Instant::now();
         let current = storage::vault_snapshot(&self.storage_paths.notes_dir).unwrap_or_default();
         if current != self.vault_snapshot {
-            self.external_changed_paths = current
+            let changed_files: HashSet<PathBuf> = current
                 .symmetric_difference(&self.vault_snapshot)
                 .map(|(path, _)| path.clone())
-                .collect::<HashSet<_>>()
-                .into_iter()
                 .collect();
-            self.external_changed_paths.sort();
-            if self.dirty_note_ids.is_empty() {
+
+            // Collect file paths of all notes currently dirty in memory
+            let dirty_file_paths: HashSet<PathBuf> = self
+                .data
+                .notes
+                .iter()
+                .filter(|note| self.dirty_note_ids.contains(&note.id))
+                .map(|note| note.file_path.clone())
+                .collect();
+
+            // True conflict only if an external change modified a note that is dirty in Lilo's memory
+            let has_dirty_conflict = changed_files.iter().any(|p| dirty_file_paths.contains(p));
+
+            if has_dirty_conflict {
+                self.external_conflict = true;
+                let mut changed_list: Vec<PathBuf> = changed_files.into_iter().collect();
+                changed_list.sort();
+                self.external_changed_paths = changed_list;
+                self.storage_message = Some(
+                    "Files changed outside Lilo conflict with unsaved local edits.".to_owned(),
+                );
+            } else if self.dirty_note_ids.is_empty() {
                 self.reload_vault("Reloaded changes from disk");
             } else {
-                self.external_conflict = true;
-                self.storage_message = Some(
-                    "Files changed outside Lilo. Save or discard local edits, then reload."
-                        .to_owned(),
-                );
+                // If other files changed on disk but not the one being typed into, update snapshot safely
+                self.vault_snapshot = current;
             }
         }
         ctx.request_repaint_after(EXTERNAL_SYNC_INTERVAL);
@@ -1076,126 +1413,184 @@ impl WidgetApp {
         ui.add_space(8.0);
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui_style::card_frame(ui).show(ui, |ui| {
-                egui::CollapsingHeader::new(egui::RichText::new("Appearance").strong())
-                    .id_salt("settings_appearance")
-                    .show(ui, |ui| {
-                        ui_style::muted(ui, "Theme, font size, accent colour and navigation");
-                        ui.horizontal(|ui| {
-                            ui.selectable_value(
-                                &mut self.settings.theme,
-                                ThemeChoice::Dark,
-                                "Dark",
-                            );
-                            ui.selectable_value(
-                                &mut self.settings.theme,
-                                ThemeChoice::Light,
-                                "Light",
-                            );
-                            ui.selectable_value(
-                                &mut self.settings.theme,
-                                ThemeChoice::System,
-                                "System",
-                            );
-                        });
-                        ui.add(
-                            egui::Slider::new(&mut self.settings.font_size, 12.0..=22.0)
-                                .text("Editor font"),
+                egui::CollapsingHeader::new(
+                    egui::RichText::new("Appearance & Typography").strong(),
+                )
+                .id_salt("settings_appearance")
+                .show(ui, |ui| {
+                    ui_style::muted(ui, "Theme, typography, accent colour and layout");
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(&mut self.settings.theme, ThemeChoice::Dark, "Dark");
+                        ui.selectable_value(&mut self.settings.theme, ThemeChoice::Light, "Light");
+                        ui.selectable_value(
+                            &mut self.settings.theme,
+                            ThemeChoice::System,
+                            "System",
                         );
-                        ui.horizontal(|ui| {
-                            ui.label("Accent");
-                            ui.color_edit_button_srgb(&mut self.settings.accent_rgb);
-                        });
-                        if ui
-                            .checkbox(&mut self.settings.always_on_top, "Always on top")
-                            .changed()
-                        {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
-                                if self.settings.always_on_top {
-                                    egui::viewport::WindowLevel::AlwaysOnTop
-                                } else {
-                                    egui::viewport::WindowLevel::Normal
-                                },
-                            ));
-                        }
-                        let autostart_before = self.settings.autostart;
-                        let autostart_response = ui
-                            .add_enabled(
-                                operating_system.supports_autostart(),
-                                egui::Checkbox::new(
-                                    &mut self.settings.autostart,
-                                    operating_system.autostart_label(),
-                                ),
-                            )
-                            .on_disabled_hover_text(format!(
-                                "Autostart integration is not implemented for {}",
-                                operating_system.name()
-                            ));
-                        if autostart_response.changed()
-                            && let Err(error) = platform::set_autostart(self.settings.autostart)
-                        {
-                            self.settings.autostart = autostart_before;
-                            self.storage_message =
-                                Some(format!("Autostart update failed: {error}"));
-                        }
-                        ui.label("Navigation toolbar");
-                        egui::ComboBox::from_id_salt("toolbar_placement")
-                            .selected_text(match self.settings.toolbar_placement {
-                                ToolbarPlacement::Auto => "Auto",
-                                ToolbarPlacement::Top => "Top",
-                                ToolbarPlacement::Left => "Left",
-                                ToolbarPlacement::Right => "Right",
-                                ToolbarPlacement::Floating => "Floating",
-                            })
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut self.settings.toolbar_placement,
-                                    ToolbarPlacement::Auto,
-                                    "Auto — top when compact, left when wide",
-                                );
-                                ui.selectable_value(
-                                    &mut self.settings.toolbar_placement,
-                                    ToolbarPlacement::Top,
-                                    "Top",
-                                );
-                                ui.selectable_value(
-                                    &mut self.settings.toolbar_placement,
-                                    ToolbarPlacement::Left,
-                                    "Left",
-                                );
-                                ui.selectable_value(
-                                    &mut self.settings.toolbar_placement,
-                                    ToolbarPlacement::Right,
-                                    "Right",
-                                );
-                                ui.selectable_value(
-                                    &mut self.settings.toolbar_placement,
-                                    ToolbarPlacement::Floating,
-                                    "Floating",
-                                );
-                            });
-                        ui.checkbox(
-                            &mut self.settings.toolbar_expanded,
-                            "Show labels when there is enough space",
-                        );
-                        if self.settings.toolbar_placement == ToolbarPlacement::Floating {
-                            ui.checkbox(
-                                &mut self.settings.floating_toolbar_vertical,
-                                "Vertical floating toolbar",
-                            );
-                            ui_style::muted(
-                                ui,
-                                "Drag the grip to move it. Drop near an edge to dock.",
-                            );
-                        }
                     });
+                    ui.add(
+                        egui::Slider::new(&mut self.settings.editor_font_size, 10.0..=32.0)
+                            .text("Editor font size (Ctrl +/-)"),
+                    );
+                    self.settings.font_size = self.settings.editor_font_size;
+                    ui.add(
+                        egui::Slider::new(&mut self.settings.ui_font_size, 11.0..=20.0)
+                            .text("UI interface font size"),
+                    );
+                    ui.checkbox(&mut self.settings.zen_mode, "Zen / Writing mode (F11)");
+                    ui.horizontal(|ui| {
+                        ui.label("Accent");
+                        ui.color_edit_button_srgb(&mut self.settings.accent_rgb);
+                    });
+                    if ui
+                        .checkbox(&mut self.settings.always_on_top, "Always on top")
+                        .changed()
+                    {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+                            if self.settings.always_on_top {
+                                egui::viewport::WindowLevel::AlwaysOnTop
+                            } else {
+                                egui::viewport::WindowLevel::Normal
+                            },
+                        ));
+                    }
+                    let autostart_before = self.settings.autostart;
+                    let autostart_response = ui
+                        .add_enabled(
+                            operating_system.supports_autostart(),
+                            egui::Checkbox::new(
+                                &mut self.settings.autostart,
+                                operating_system.autostart_label(),
+                            ),
+                        )
+                        .on_disabled_hover_text(format!(
+                            "Autostart integration is not implemented for {}",
+                            operating_system.name()
+                        ));
+                    if autostart_response.changed()
+                        && let Err(error) = platform::set_autostart(self.settings.autostart)
+                    {
+                        self.settings.autostart = autostart_before;
+                        self.storage_message = Some(format!("Autostart update failed: {error}"));
+                    }
+                    ui.label("Navigation toolbar");
+                    egui::ComboBox::from_id_salt("toolbar_placement")
+                        .selected_text(match self.settings.toolbar_placement {
+                            ToolbarPlacement::Auto => "Auto",
+                            ToolbarPlacement::Top => "Top",
+                            ToolbarPlacement::Left => "Left",
+                            ToolbarPlacement::Right => "Right",
+                            ToolbarPlacement::Floating => "Floating",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.settings.toolbar_placement,
+                                ToolbarPlacement::Auto,
+                                "Auto — top when compact, left when wide",
+                            );
+                            ui.selectable_value(
+                                &mut self.settings.toolbar_placement,
+                                ToolbarPlacement::Top,
+                                "Top",
+                            );
+                            ui.selectable_value(
+                                &mut self.settings.toolbar_placement,
+                                ToolbarPlacement::Left,
+                                "Left",
+                            );
+                            ui.selectable_value(
+                                &mut self.settings.toolbar_placement,
+                                ToolbarPlacement::Right,
+                                "Right",
+                            );
+                            ui.selectable_value(
+                                &mut self.settings.toolbar_placement,
+                                ToolbarPlacement::Floating,
+                                "Floating",
+                            );
+                        });
+                    ui.checkbox(
+                        &mut self.settings.toolbar_expanded,
+                        "Show labels when there is enough space",
+                    );
+                    if self.settings.toolbar_placement == ToolbarPlacement::Floating {
+                        ui.checkbox(
+                            &mut self.settings.floating_toolbar_vertical,
+                            "Vertical floating toolbar",
+                        );
+                        ui_style::muted(ui, "Drag the grip to move it. Drop near an edge to dock.");
+                    }
+                });
             });
 
             ui.add_space(7.0);
             ui_style::card_frame(ui).show(ui, |ui| {
-                egui::CollapsingHeader::new(egui::RichText::new("Storage").strong())
+                egui::CollapsingHeader::new(
+                    egui::RichText::new("Daily Notes & Templates").strong(),
+                )
+                .id_salt("settings_daily_templates")
+                .show(ui, |ui| {
+                    ui_style::muted(
+                        ui,
+                        "Configuration for daily workflow, templates and quick capture",
+                    );
+                    ui.horizontal(|ui| {
+                        ui.label("Daily notes folder:");
+                        let mut folder_str = self.settings.daily_notes_folder.display().to_string();
+                        if ui.text_edit_singleline(&mut folder_str).changed() {
+                            self.settings.daily_notes_folder = PathBuf::from(folder_str);
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Daily note date format:");
+                        ui.text_edit_singleline(&mut self.settings.daily_note_format);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Templates folder:");
+                        let mut t_str = self.settings.templates_folder.display().to_string();
+                        if ui.text_edit_singleline(&mut t_str).changed() {
+                            self.settings.templates_folder = PathBuf::from(t_str);
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Default daily template:");
+                        ui.text_edit_singleline(&mut self.settings.default_daily_template);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Quick capture target:");
+                        egui::ComboBox::from_id_salt("quick_capture_target_combo")
+                            .selected_text(match self.settings.quick_capture_target {
+                                QuickCaptureTarget::DailyNote => "Today's Daily Note",
+                                QuickCaptureTarget::Inbox => "Inbox.md",
+                                QuickCaptureTarget::NewNote => "Create New Timestamped Note",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut self.settings.quick_capture_target,
+                                    QuickCaptureTarget::DailyNote,
+                                    "Today's Daily Note",
+                                );
+                                ui.selectable_value(
+                                    &mut self.settings.quick_capture_target,
+                                    QuickCaptureTarget::Inbox,
+                                    "Inbox.md",
+                                );
+                                ui.selectable_value(
+                                    &mut self.settings.quick_capture_target,
+                                    QuickCaptureTarget::NewNote,
+                                    "Create New Timestamped Note",
+                                );
+                            });
+                    });
+                });
+            });
+
+            ui.add_space(7.0);
+            ui_style::card_frame(ui).show(ui, |ui| {
+                egui::CollapsingHeader::new(egui::RichText::new("Storage & Cache").strong())
                     .id_salt("settings_storage")
                     .show(ui, |ui| {
-                        ui_style::muted(ui, "Vault path, backups, import and export");
+                        ui_style::muted(ui, "Vault path, backups, cache directory and export");
                         ui.text_edit_singleline(&mut self.vault_path_buffer);
                         ui.horizontal_wrapped(|ui| {
                             if ui.button("Switch vault now").clicked() {
@@ -1274,6 +1669,64 @@ impl WidgetApp {
         });
     }
 
+    fn apply_notes_list_actions(&mut self, actions: NotesListActions) {
+        if let Some(id) = actions.selected_note_id {
+            self.open_note(id);
+        }
+        if let Some(path) = actions.toggled_folder {
+            if let Some(index) = self
+                .settings
+                .collapsed_folders
+                .iter()
+                .position(|collapsed| collapsed == &path)
+            {
+                self.settings.collapsed_folders.remove(index);
+            } else {
+                self.settings.collapsed_folders.push(path);
+            }
+            self.save_settings();
+        }
+
+        if let Some(path) = actions.selected_folder {
+            self.settings.selected_folder = path;
+            self.pending_delete_id = None;
+            self.save_settings();
+        }
+        if let Some(id) = actions.requested_delete_id {
+            self.pending_delete_id = Some(id);
+        }
+        if let Some(id) = actions.toggled_pin_id {
+            self.toggle_pin(id);
+        }
+        if let Some(path) = actions.rename_folder {
+            self.folder_name_buffer = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            self.editing_folder = Some(path);
+        }
+        if let Some(path) = actions.delete_folder {
+            let count = self
+                .data
+                .notes
+                .iter()
+                .filter(|n| {
+                    n.file_path
+                        .strip_prefix(&self.storage_paths.notes_dir)
+                        .ok()
+                        .is_some_and(|r| r.starts_with(&path))
+                })
+                .count();
+            if count == 0 {
+                self.delete_folder(&path);
+            } else {
+                self.pending_folder_delete = Some(path);
+                self.pending_folder_notes_count = count;
+            }
+        }
+    }
+
     fn show_notes_list(&mut self, ui: &mut egui::Ui) {
         ui.set_max_width(ui.available_width().min(1100.0));
         let mut create_note_clicked = false;
@@ -1330,14 +1783,11 @@ impl WidgetApp {
         let search_response = ui.add(
             egui::TextEdit::singleline(&mut self.search_query)
                 .desired_width(f32::INFINITY)
-                .hint_text("Search notes..."),
+                .hint_text("Search notes or tag:rust path:\"Daily Notes\" link:Target..."),
         );
         if self.focus_search {
             search_response.request_focus();
             self.focus_search = false;
-        }
-        if search_response.changed() {
-            self.normalized_search_query = self.search_query.trim().to_lowercase();
         }
 
         ui.horizontal(|ui| {
@@ -1369,6 +1819,27 @@ impl WidgetApp {
 
         ui.add_space(6.0);
 
+        let parsed_query = SearchQuery::parse(&self.search_query);
+        let mut outgoing_links_by_id = HashMap::new();
+        for note in &self.data.notes {
+            let links = self
+                .link_index
+                .links_for(note.id)
+                .map(|l| {
+                    let mut targets = l.unresolved.clone();
+                    for &target_id in &l.outgoing {
+                        if let Some(target_note) =
+                            self.data.notes.iter().find(|n| n.id == target_id)
+                        {
+                            targets.push(target_note.title.clone());
+                        }
+                    }
+                    targets
+                })
+                .unwrap_or_default();
+            outgoing_links_by_id.insert(note.id, links);
+        }
+
         let actions = {
             let tree = folders::FolderTree::build(
                 &self.data.notes,
@@ -1392,17 +1863,27 @@ impl WidgetApp {
                     if !pinned.is_empty() {
                         ui.strong("Pinned");
                         for note in pinned {
-                            if self.normalized_search_query.is_empty()
-                                || note.search_text.contains(&self.normalized_search_query)
-                            {
+                            let links = outgoing_links_by_id
+                                .get(&note.id)
+                                .map_or(&[] as &[String], Vec::as_slice);
+                            let folder_rel = note
+                                .file_path
+                                .parent()
+                                .and_then(|p| p.strip_prefix(&self.storage_paths.notes_dir).ok())
+                                .unwrap_or(Path::new(""));
+                            if parsed_query.matches_note(note, folder_rel, links) {
                                 show_note_row(ui, note, self.data.selected_note_id, &mut actions);
                             }
                         }
                         ui.separator();
                         ui.strong("Folders and recent notes");
                     }
-                    if !folder_has_visible_notes(&tree.root, &notes, &self.normalized_search_query)
-                    {
+                    if !folder_has_visible_notes(
+                        &tree.root,
+                        &notes,
+                        &parsed_query,
+                        &outgoing_links_by_id,
+                    ) {
                         ui.vertical_centered(|ui| {
                             ui.add_space(20.0);
                             ui.label("No notes found");
@@ -1412,7 +1893,8 @@ impl WidgetApp {
                             ui,
                             &tree.root,
                             &notes,
-                            &self.normalized_search_query,
+                            &parsed_query,
+                            &outgoing_links_by_id,
                             self.data.selected_note_id,
                             &self.settings.selected_folder,
                             &self.settings.collapsed_folders,
@@ -1424,42 +1906,7 @@ impl WidgetApp {
             actions
         };
 
-        if let Some(path) = actions.toggled_folder {
-            if let Some(index) = self
-                .settings
-                .collapsed_folders
-                .iter()
-                .position(|collapsed| collapsed == &path)
-            {
-                self.settings.collapsed_folders.remove(index);
-            } else {
-                self.settings.collapsed_folders.push(path);
-            }
-            self.save_settings();
-        }
-
-        if let Some(path) = actions.selected_folder {
-            self.settings.selected_folder = path;
-            self.pending_delete_id = None;
-            self.save_settings();
-        }
-        if let Some(id) = actions.requested_delete_id {
-            self.pending_delete_id = Some(id);
-        }
-        if let Some(id) = actions.toggled_pin_id {
-            self.toggle_pin(id);
-        }
-        if let Some(path) = actions.rename_folder {
-            self.folder_name_buffer = path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned();
-            self.editing_folder = Some(path);
-        }
-        if let Some(path) = actions.delete_folder {
-            self.delete_folder(&path);
-        }
+        self.apply_notes_list_actions(actions);
 
         if self.editing_folder.is_some() {
             ui.separator();
@@ -1475,19 +1922,6 @@ impl WidgetApp {
             });
         }
 
-        if let Some(id) = self.pending_delete_id {
-            ui.separator();
-            ui.horizontal(|ui| {
-                ui.label("Move this note to Trash?");
-                if ui.button("Yes").clicked() {
-                    self.delete_note(id);
-                }
-                if ui.button("No").clicked() {
-                    self.pending_delete_id = None;
-                }
-            });
-        }
-
         if submit_new_folder {
             self.create_folder_from_input();
         }
@@ -1496,9 +1930,6 @@ impl WidgetApp {
         }
         if create_note_clicked {
             self.create_note();
-        }
-        if let Some(id) = actions.selected_note_id {
-            self.open_note(id);
         }
     }
 
@@ -1516,13 +1947,18 @@ impl WidgetApp {
     }
 
     fn navigate_note_list(&mut self, direction: isize) {
+        let query = SearchQuery::parse(&self.search_query);
         let mut notes = self
             .data
             .notes
             .iter()
             .filter(|note| {
-                self.normalized_search_query.is_empty()
-                    || note.search_text.contains(&self.normalized_search_query)
+                let folder = note
+                    .file_path
+                    .parent()
+                    .and_then(|p| p.strip_prefix(&self.storage_paths.notes_dir).ok())
+                    .unwrap_or(Path::new(""));
+                query.matches_note(note, folder, &[])
             })
             .collect::<Vec<_>>();
         notes.sort_by(|left, right| {
@@ -1692,49 +2128,6 @@ impl WidgetApp {
         }
     }
 
-    fn show_editor_footer(&mut self, ui: &mut egui::Ui, note_id: Uuid) {
-        let (outgoing, backlinks, missing) = self
-            .link_index
-            .links_for(note_id)
-            .map(|links| {
-                (
-                    links.outgoing.len(),
-                    links.backlinks.len(),
-                    links.unresolved.len(),
-                )
-            })
-            .unwrap_or_default();
-        let updated = self
-            .data
-            .notes
-            .iter()
-            .find(|note| note.id == note_id)
-            .map(|note| note.updated_at.format("%H:%M").to_string())
-            .unwrap_or_default();
-        let saving = self.dirty_note_ids.contains(&note_id);
-
-        ui.separator();
-        ui.horizontal_wrapped(|ui| {
-            ui_style::muted(
-                ui,
-                format!("Links: {outgoing}  ·  Backlinks: {backlinks}  ·  Missing: {missing}"),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("Details").clicked() {
-                    self.note_details_open = true;
-                }
-                ui_style::muted(
-                    ui,
-                    if saving {
-                        "Saving...".to_owned()
-                    } else {
-                        format!("Saved · {updated}")
-                    },
-                );
-            });
-        });
-    }
-
     fn show_note_properties(&mut self, ui: &mut egui::Ui, note_id: Uuid) {
         let mut changed = false;
         ui.collapsing("Properties: tags and aliases", |ui| {
@@ -1806,6 +2199,551 @@ impl WidgetApp {
             self.mark_note_dirty(note_id);
         }
     }
+
+    fn is_daily_note(&self, note: &Note) -> bool {
+        let rel = note
+            .file_path
+            .strip_prefix(&self.storage_paths.notes_dir)
+            .unwrap_or(&note.file_path);
+        let in_daily_folder = rel.starts_with(&self.settings.daily_notes_folder);
+        let title_is_date =
+            chrono::NaiveDate::parse_from_str(note.title.trim(), "%Y-%m-%d").is_ok();
+        in_daily_folder || title_is_date
+    }
+
+    fn show_left_explorer(&mut self, ui: &mut egui::Ui) {
+        let mut create_note_clicked = false;
+        let mut submit_new_folder = false;
+
+        ui.horizontal(|ui| {
+            let width = ui.available_width();
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui_style::compact_action(ui, Icon::Folder, "New folder").clicked() {
+                    self.show_new_folder_input = !self.show_new_folder_input;
+                    self.new_folder_name.clear();
+                }
+                if ui_style::compact_action(ui, Icon::Add, "New note").clicked() {
+                    create_note_clicked = true;
+                }
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    if width >= 120.0 {
+                        ui.label(
+                            egui::RichText::new("EXPLORER")
+                                .strong()
+                                .size(12.0)
+                                .color(ui.visuals().weak_text_color()),
+                        );
+                    }
+                });
+            });
+        });
+
+        ui.add_space(4.0);
+
+        // Quick Access Rows
+        let today_date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
+        if ui
+            .button(format!("📅 Today ({today_date_str})"))
+            .on_hover_text("Open or create today's daily note (Alt+D)")
+            .clicked()
+        {
+            self.open_or_create_daily_note(0);
+            self.activate_view(AppView::Editor);
+        }
+        if ui
+            .button("⚡ Quick Capture")
+            .on_hover_text("Open Quick Capture overlay (Ctrl+Shift+C)")
+            .clicked()
+        {
+            self.quick_capture_state.open();
+        }
+        if ui
+            .button("📝 Templates...")
+            .on_hover_text("Select template for a new note")
+            .clicked()
+        {
+            self.template_selector_open = true;
+            self.template_selector_for_new_note = true;
+        }
+
+        // Pinned notes section
+        let pinned_notes: Vec<(Uuid, String)> = self
+            .data
+            .notes
+            .iter()
+            .filter(|n| n.pinned)
+            .map(|n| (n.id, n.title.clone()))
+            .collect();
+        let mut open_pinned_id = None;
+        if !pinned_notes.is_empty() {
+            ui.add_space(4.0);
+            ui.collapsing(
+                egui::RichText::new(format!("⭐ Pinned ({})", pinned_notes.len())).strong(),
+                |ui| {
+                    for (pinned_id, pinned_title) in pinned_notes {
+                        let selected = self.data.selected_note_id == Some(pinned_id);
+                        if ui
+                            .selectable_label(selected, format!("• {pinned_title}"))
+                            .clicked()
+                        {
+                            open_pinned_id = Some(pinned_id);
+                        }
+                    }
+                },
+            );
+        }
+        if let Some(id) = open_pinned_id {
+            self.open_note(id);
+            self.activate_view(AppView::Editor);
+        }
+
+        ui.add_space(4.0);
+        ui.separator();
+
+        // Folder and Note Tree with search input
+        if self.show_new_folder_input {
+            ui.horizontal(|ui| {
+                let input_width = (ui.available_width() - 58.0).max(40.0);
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut self.new_folder_name)
+                        .desired_width(input_width)
+                        .hint_text("Folder name..."),
+                );
+                let enter_pressed =
+                    response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if ui.small_button("Create").clicked() || enter_pressed {
+                    submit_new_folder = true;
+                }
+            });
+        }
+
+        let search_response = ui.add(
+            egui::TextEdit::singleline(&mut self.search_query)
+                .desired_width(f32::INFINITY)
+                .hint_text("Search notes or #tag..."),
+        );
+        if self.focus_search {
+            search_response.request_focus();
+            self.focus_search = false;
+        }
+
+        ui.add_space(4.0);
+
+        let parsed_query = SearchQuery::parse(&self.search_query);
+        let mut outgoing_links_by_id = HashMap::new();
+        for note in &self.data.notes {
+            let links = self.link_index.links_for(note.id).map_or(Vec::new(), |l| {
+                l.outgoing
+                    .iter()
+                    .filter_map(|&id| {
+                        self.data
+                            .notes
+                            .iter()
+                            .find(|n| n.id == id)
+                            .map(|n| n.title.clone())
+                    })
+                    .collect()
+            });
+            outgoing_links_by_id.insert(note.id, links);
+        }
+        let notes_by_id: HashMap<Uuid, &Note> = self.data.notes.iter().map(|n| (n.id, n)).collect();
+        let folder_tree = folders::FolderTree::build(
+            &self.data.notes,
+            &self.storage_paths.notes_dir,
+            &self.folder_paths,
+        );
+
+        let mut actions = NotesListActions::default();
+
+        let mut tag_counts: HashMap<String, usize> = HashMap::new();
+        for note in &self.data.notes {
+            for tag in &note.tags {
+                *tag_counts.entry(tag.clone()).or_default() += 1;
+            }
+        }
+        let mut sorted_tags: Vec<(String, usize)> = tag_counts.into_iter().collect();
+        sorted_tags.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let mut clicked_tag_toggle = None;
+
+        let available_tree_height = (ui.available_height() - 36.0).max(100.0);
+        egui::ScrollArea::vertical()
+            .max_height(available_tree_height)
+            .show(ui, |ui| {
+                show_folder_node(
+                    ui,
+                    &folder_tree.root,
+                    &notes_by_id,
+                    &parsed_query,
+                    &outgoing_links_by_id,
+                    self.data.selected_note_id,
+                    &self.settings.selected_folder,
+                    &self.settings.collapsed_folders,
+                    self.settings.note_sort,
+                    &mut actions,
+                );
+
+                if !sorted_tags.is_empty() {
+                    ui.add_space(8.0);
+                    ui.collapsing(
+                        egui::RichText::new(format!("Tags ({})", sorted_tags.len())).strong(),
+                        |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                for (tag, count) in &sorted_tags {
+                                    let is_selected =
+                                        self.search_query.contains(&format!("#{tag}"));
+                                    let pill =
+                                        ui_style::pill_frame(ui, is_selected).show(ui, |ui| {
+                                            ui.label(
+                                                egui::RichText::new(format!("#{tag} ({count})"))
+                                                    .small()
+                                                    .color(if is_selected {
+                                                        ui.visuals().hyperlink_color
+                                                    } else {
+                                                        ui.visuals().text_color()
+                                                    }),
+                                            )
+                                        });
+                                    if pill.response.interact(egui::Sense::click()).clicked() {
+                                        clicked_tag_toggle = Some((tag.clone(), is_selected));
+                                    }
+                                }
+                            });
+                        },
+                    );
+                }
+            });
+
+        if let Some((tag, is_selected)) = clicked_tag_toggle {
+            if is_selected {
+                self.search_query.clear();
+            } else {
+                self.search_query = format!("#{tag}");
+            }
+        }
+
+        ui.add_space(4.0);
+        ui.separator();
+        ui.horizontal(|ui| {
+            if ui
+                .button("🗑️ Trash")
+                .on_hover_text("Open Trash & Backups")
+                .clicked()
+            {
+                self.activate_view(AppView::Trash);
+            }
+            if ui
+                .button("⚙ Settings")
+                .on_hover_text("Open Settings (Ctrl+,)")
+                .clicked()
+            {
+                self.activate_view(AppView::Settings);
+            }
+        });
+
+        if create_note_clicked {
+            self.create_note();
+        }
+        if submit_new_folder {
+            self.create_folder_from_input();
+        }
+        self.apply_notes_list_actions(actions);
+    }
+
+    fn show_right_inspector(&mut self, ui: &mut egui::Ui, note: &Note) {
+        let editor_id = ui.make_persistent_id(("markdown_editor", note.id));
+        let mut navigate_to_note = None;
+        let mut jump_cursor_idx = None;
+
+        let outgoing_links: Vec<(Uuid, String)> = self
+            .link_index
+            .links_for(note.id)
+            .map(|l| {
+                l.outgoing
+                    .iter()
+                    .filter_map(|&id| {
+                        self.data
+                            .notes
+                            .iter()
+                            .find(|n| n.id == id)
+                            .map(|n| (id, n.title.clone()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let backlinks: Vec<(Uuid, String)> = self
+            .link_index
+            .links_for(note.id)
+            .map(|l| {
+                l.backlinks
+                    .iter()
+                    .filter_map(|&id| {
+                        self.data
+                            .notes
+                            .iter()
+                            .find(|n| n.id == id)
+                            .map(|n| (id, n.title.clone()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new("INSPECTOR")
+                        .strong()
+                        .size(12.0)
+                        .color(ui.visuals().weak_text_color()),
+                );
+            });
+            ui.separator();
+
+            // 1. Outline (TOC)
+            let outline = markdown::extract_outline(&note.content);
+            ui.collapsing(
+                egui::RichText::new(format!("Outline ({})", outline.len())).strong(),
+                |ui| {
+                    if outline.is_empty() {
+                        ui.label(
+                            egui::RichText::new("No headings found")
+                                .small()
+                                .color(ui.visuals().weak_text_color()),
+                        );
+                    } else {
+                        for item in outline {
+                            let indent = (item.level.saturating_sub(1) as f32) * 10.0;
+                            ui.horizontal(|ui| {
+                                if indent > 0.0 {
+                                    ui.add_space(indent);
+                                }
+                                let text = if item.level == 1 {
+                                    egui::RichText::new(&item.title).strong()
+                                } else {
+                                    egui::RichText::new(&item.title)
+                                };
+                                if ui.link(text).clicked() {
+                                    jump_cursor_idx = Some(item.char_index);
+                                }
+                            });
+                        }
+                    }
+                },
+            );
+            ui.add_space(6.0);
+
+            // 2. Connected Notes (Outgoing + Backlinks)
+            ui.collapsing(
+                egui::RichText::new(format!(
+                    "Connected Notes ({})",
+                    outgoing_links.len() + backlinks.len()
+                ))
+                .strong(),
+                |ui| {
+                    if !outgoing_links.is_empty() {
+                        ui.label(
+                            egui::RichText::new("Outgoing:")
+                                .small()
+                                .color(ui.visuals().weak_text_color()),
+                        );
+                        for (out_id, out_title) in &outgoing_links {
+                            if ui.link(format!("→ {out_title}")).clicked() {
+                                navigate_to_note = Some(*out_id);
+                            }
+                        }
+                    }
+                    if !backlinks.is_empty() {
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new("Backlinks:")
+                                .small()
+                                .color(ui.visuals().weak_text_color()),
+                        );
+                        for (back_id, back_title) in &backlinks {
+                            if ui.link(format!("← {back_title}")).clicked() {
+                                navigate_to_note = Some(*back_id);
+                            }
+                        }
+                    }
+                },
+            );
+            ui.add_space(6.0);
+
+            // 3. Properties: Tags and Aliases
+            self.show_note_properties(ui, note.id);
+        });
+
+        if let Some(idx) = jump_cursor_idx {
+            markdown::set_cursor_char_index(ui.ctx(), editor_id, idx);
+        }
+        if let Some(id) = navigate_to_note {
+            self.open_note(id);
+        }
+    }
+
+    fn show_bottom_status_bar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            let total_width = ui.available_width();
+
+            // Right-aligned elements: resize grip, save status, words/chars
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui_style::paint_resize_grip(ui);
+                ui.add_space(4.0);
+
+                if let Some(note) = self.data.selected_note() {
+                    let saving = self.dirty_note_ids.contains(&note.id);
+                    let updated = note.updated_at.format("%H:%M").to_string();
+                    let save_status = if saving {
+                        "Saving...".to_owned()
+                    } else {
+                        format!("Saved · {updated}")
+                    };
+                    ui_style::muted(ui, save_status);
+
+                    if total_width >= 560.0 {
+                        ui.add_space(8.0);
+                        let (words, chars) = markdown::count_words_and_chars(&note.content);
+                        ui_style::muted(ui, format!("Words: {words}  ·  Chars: {chars}"));
+                    }
+                }
+
+                // Left-aligned in remaining area
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    if let Some(msg) = &self.storage_message {
+                        ui.label(
+                            egui::RichText::new(msg)
+                                .small()
+                                .color(ui.visuals().hyperlink_color),
+                        );
+                    } else if let Some(note) = self.data.selected_note() {
+                        let (outgoing, backlinks, missing) = self
+                            .link_index
+                            .links_for(note.id)
+                            .map(|l| (l.outgoing.len(), l.backlinks.len(), l.unresolved.len()))
+                            .unwrap_or_default();
+                        ui_style::muted(
+                            ui,
+                            if total_width < 460.0 {
+                                format!("🔗 {outgoing}  ·  ← {backlinks}")
+                            } else {
+                                format!("🔗 Links: {outgoing}  ·  Backlinks: {backlinks}  ·  Missing: {missing}")
+                            },
+                        );
+                    } else {
+                        ui_style::muted(ui, format!("{} notes in vault", self.data.notes.len()));
+                    }
+                });
+            });
+        });
+    }
+
+    fn handle_command_action(&mut self, action: CommandAction) {
+        match action {
+            CommandAction::OpenTodayNote => self.open_or_create_daily_note(0),
+            CommandAction::OpenYesterdayNote => self.open_or_create_daily_note(-1),
+            CommandAction::OpenTomorrowNote => self.open_or_create_daily_note(1),
+            CommandAction::QuickCapture => self.quick_capture_state.open(),
+            CommandAction::NewNoteFromTemplate => {
+                self.template_selector_open = true;
+                self.template_selector_for_new_note = true;
+            }
+            CommandAction::InsertTemplate => {
+                self.template_selector_open = true;
+                self.template_selector_for_new_note = false;
+            }
+            CommandAction::NewNote => self.create_note(),
+            CommandAction::SaveNote => self.flush_dirty_notes(),
+            CommandAction::TogglePin => {
+                if let Some(id) = self.data.selected_note_id {
+                    self.toggle_pin(id);
+                }
+            }
+            CommandAction::MoveToFolder => self.move_selected_note_to_selected_folder(),
+            CommandAction::DeleteNote => {
+                if let Some(id) = self.data.selected_note_id {
+                    self.delete_note(id);
+                }
+            }
+            CommandAction::NoteDetails => self.note_details_open = true,
+            CommandAction::ViewEditor => self.activate_view(AppView::Editor),
+            CommandAction::ViewNotesList => self.activate_view(AppView::NotesList),
+            CommandAction::ViewGraph => self.activate_view(AppView::Graph),
+            CommandAction::ViewTrash => self.activate_view(AppView::Trash),
+            CommandAction::ViewSettings => self.activate_view(AppView::Settings),
+            CommandAction::ToggleZenMode => {
+                self.settings.zen_mode = !self.settings.zen_mode;
+                self.save_settings();
+            }
+            CommandAction::ToggleLeftSidebar => {
+                self.settings.left_sidebar_open = !self.settings.left_sidebar_open;
+                self.save_settings();
+            }
+            CommandAction::ToggleRightInspector => {
+                self.settings.right_sidebar_open = !self.settings.right_sidebar_open;
+                self.save_settings();
+            }
+            CommandAction::ZoomIn => {
+                self.settings.editor_font_size = (self.settings.editor_font_size + 1.0).min(32.0);
+                self.settings.font_size = self.settings.editor_font_size;
+                self.save_settings();
+            }
+            CommandAction::ZoomOut => {
+                self.settings.editor_font_size = (self.settings.editor_font_size - 1.0).max(10.0);
+                self.settings.font_size = self.settings.editor_font_size;
+                self.save_settings();
+            }
+            CommandAction::ZoomReset => {
+                self.settings.editor_font_size = 14.0;
+                self.settings.font_size = 14.0;
+                self.save_settings();
+            }
+            CommandAction::ToggleTheme => {
+                self.settings.theme = match self.settings.theme {
+                    ThemeChoice::Dark => ThemeChoice::Light,
+                    ThemeChoice::Light => ThemeChoice::Dark,
+                    ThemeChoice::System => ThemeChoice::Dark,
+                };
+                self.save_settings();
+            }
+            CommandAction::ToggleAlwaysOnTop => {
+                self.settings.always_on_top = !self.settings.always_on_top;
+                self.window_settings_applied = false;
+                self.save_settings();
+            }
+            CommandAction::SwitchVault => self.activate_view(AppView::Settings),
+            CommandAction::ScanDiagnostics => {
+                self.recovery_tab = RecoveryTab::Diagnostics;
+                self.activate_view(AppView::Trash);
+            }
+            CommandAction::ExportVault => self.activate_view(AppView::Settings),
+            CommandAction::NewFolder => {
+                self.activate_view(AppView::NotesList);
+                self.show_new_folder_input = true;
+            }
+            CommandAction::DeleteFolder => {
+                let folder = self.settings.selected_folder.clone();
+                if !folder.as_os_str().is_empty() {
+                    let count = self
+                        .data
+                        .notes
+                        .iter()
+                        .filter(|n| {
+                            n.file_path
+                                .strip_prefix(&self.storage_paths.notes_dir)
+                                .ok()
+                                .is_some_and(|r| r.starts_with(&folder))
+                        })
+                        .count();
+                    if count == 0 {
+                        self.delete_folder(&folder);
+                    } else {
+                        self.pending_folder_delete = Some(folder);
+                        self.pending_folder_notes_count = count;
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl eframe::App for WidgetApp {
@@ -1833,8 +2771,14 @@ impl eframe::App for WidgetApp {
             ThemeChoice::Dark => true,
             ThemeChoice::System => !matches!(ctx.system_theme(), Some(egui::Theme::Light)),
         };
-        ui_style::apply_theme(&ctx, dark_theme, accent);
+        ui_style::apply_theme(&ctx, dark_theme, accent, self.settings.ui_font_size);
 
+        // Frameless window edge and corner resizing
+        ui_style::show_window_resize_handles(&ctx);
+
+        let window_width = ui.available_width();
+
+        // Hotkeys handling
         let create_note_shortcut = shortcut_pressed(&ctx, &self.settings.shortcuts.new_note);
         let open_search_shortcut = shortcut_pressed(&ctx, &self.settings.shortcuts.search);
         let toggle_graph_shortcut = shortcut_pressed(&ctx, &self.settings.shortcuts.graph);
@@ -1842,6 +2786,85 @@ impl eframe::App for WidgetApp {
             shortcut_pressed(&ctx, &self.settings.shortcuts.graph_overlay);
         let save_shortcut = shortcut_pressed(&ctx, &self.settings.shortcuts.save);
         let escape_pressed = ctx.input(|input| input.key_pressed(egui::Key::Escape));
+
+        // Additional QoL Hotkeys
+        let command_palette_shortcut = ctx.input(|i| {
+            (i.modifiers.ctrl && i.key_pressed(egui::Key::P))
+                || (i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::P))
+                || (i.modifiers.ctrl && i.key_pressed(egui::Key::K))
+        });
+        let quick_capture_shortcut = ctx.input(|i| {
+            (i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::C))
+                || (i.modifiers.ctrl && i.modifiers.alt && i.key_pressed(egui::Key::N))
+        });
+        let daily_note_shortcut = ctx.input(|i| {
+            (i.modifiers.alt && i.key_pressed(egui::Key::D))
+                || (i.modifiers.ctrl && i.modifiers.alt && i.key_pressed(egui::Key::D))
+        });
+        let zen_mode_shortcut = ctx.input(|i| i.key_pressed(egui::Key::F11));
+
+        // Ctrl + Plus / Ctrl + Minus / Ctrl + 0 Font Zoom
+        let zoom_in = ctx.input(|i| {
+            i.modifiers.ctrl && (i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals))
+        });
+        let zoom_out = ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Minus));
+        let zoom_reset = ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Num0));
+
+        // Ctrl + MouseWheel font zoom
+        let wheel_delta = ctx.input(|i| {
+            if i.modifiers.ctrl {
+                i.smooth_scroll_delta.y
+            } else {
+                0.0
+            }
+        });
+        if wheel_delta.abs() > f32::EPSILON {
+            // Consume scroll delta to prevent scrolling simultaneously
+            ctx.input_mut(|i| {
+                i.smooth_scroll_delta = egui::Vec2::ZERO;
+                i.raw
+                    .events
+                    .retain(|e| !matches!(e, egui::Event::MouseWheel { .. }));
+            });
+            if wheel_delta > 0.0 {
+                self.settings.editor_font_size = (self.settings.editor_font_size + 0.5).min(32.0);
+            } else {
+                self.settings.editor_font_size = (self.settings.editor_font_size - 0.5).max(10.0);
+            }
+            self.settings.font_size = self.settings.editor_font_size;
+            self.save_settings();
+        }
+
+        if zoom_in {
+            self.settings.editor_font_size = (self.settings.editor_font_size + 1.0).min(32.0);
+            self.settings.font_size = self.settings.editor_font_size;
+            self.save_settings();
+        }
+        if zoom_out {
+            self.settings.editor_font_size = (self.settings.editor_font_size - 1.0).max(10.0);
+            self.settings.font_size = self.settings.editor_font_size;
+            self.save_settings();
+        }
+        if zoom_reset {
+            self.settings.editor_font_size = 14.0;
+            self.settings.font_size = 14.0;
+            self.save_settings();
+        }
+
+        if zen_mode_shortcut {
+            self.settings.zen_mode = !self.settings.zen_mode;
+            self.save_settings();
+        }
+        if command_palette_shortcut && !self.quick_capture_state.is_open {
+            self.command_palette_state.open();
+        }
+        if quick_capture_shortcut && !self.command_palette_state.is_open {
+            self.quick_capture_state.open();
+        }
+        if daily_note_shortcut {
+            self.open_or_create_daily_note(0);
+        }
+
         let direct_view = ctx.input(|input| {
             if !input.modifiers.ctrl || input.modifiers.alt || input.modifiers.shift {
                 None
@@ -1890,7 +2913,7 @@ impl eframe::App for WidgetApp {
         if create_note_shortcut {
             self.create_note();
         }
-        if open_search_shortcut {
+        if open_search_shortcut && !command_palette_shortcut {
             self.view = AppView::NotesList;
             self.focus_search = true;
             self.focus_editor = false;
@@ -1906,14 +2929,29 @@ impl eframe::App for WidgetApp {
             self.focus_search = false;
             self.focus_editor = self.view == AppView::Editor;
         }
+
+        // QoL Fix: Disable Ctrl+Shift+G when in compact mode!
         if toggle_overlay_shortcut {
-            self.graph_overlay_open = !self.graph_overlay_open;
+            if window_width >= ui_style::COMPACT_WIDTH {
+                self.graph_overlay_open = !self.graph_overlay_open;
+            } else {
+                self.storage_message = Some("Graph overlay is disabled in compact mode".to_owned());
+            }
         }
+
         if save_shortcut && !self.external_conflict {
             self.flush_dirty_notes();
         }
         if escape_pressed {
-            if self.graph_overlay_open {
+            if self.command_palette_state.is_open {
+                self.command_palette_state.close();
+            } else if self.quick_capture_state.is_open {
+                self.quick_capture_state.close();
+            } else if self.template_selector_open {
+                self.template_selector_open = false;
+            } else if self.pending_folder_delete.is_some() {
+                self.pending_folder_delete = None;
+            } else if self.graph_overlay_open {
                 self.graph_overlay_open = false;
             } else if self.pending_delete_id.is_some() {
                 self.pending_delete_id = None;
@@ -1931,183 +2969,312 @@ impl eframe::App for WidgetApp {
             self.focus_editor = false;
         }
 
-        let current_title = self
-            .data
-            .selected_note()
-            .map(|note| {
-                if note.title.trim().is_empty() {
-                    "Untitled"
-                } else {
-                    note.title.as_str()
-                }
-            })
-            .unwrap_or("NOTES")
-            .to_owned();
+        let effective_left_open = self.settings.left_sidebar_open
+            && window_width >= ui_style::NAV_BREAKPOINT
+            && !self.settings.zen_mode;
+        let effective_right_open = self.settings.right_sidebar_open
+            && window_width >= ui_style::WIDE_BREAKPOINT
+            && !self.settings.zen_mode
+            && self.view == AppView::Editor;
+        let effective_status_bar = self.settings.show_status_bar && !self.settings.zen_mode;
 
-        let window_width = ui.available_width();
-        let toolbar_placement = self.effective_toolbar_placement(window_width);
-
-        egui::Panel::top("title_bar")
+        // Top Navigation & Control Bar (Layer 1)
+        egui::Panel::top("top_panel")
             .exact_size(ui_style::TOP_BAR_HEIGHT)
+            .frame(
+                egui::Frame::new()
+                    .fill(ui_style::layer1_color(dark_theme))
+                    .inner_margin(egui::Margin::symmetric(6, 4)),
+            )
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Lilo").strong().size(14.0));
+                    let mut close_clicked = false;
+                    let mut max_clicked = false;
+                    let mut min_clicked = false;
+                    let mut settings_clicked = false;
+                    let mut zen_clicked = false;
+                    let mut capture_clicked = false;
+                    let mut right_inspector_clicked = false;
+                    let mut search_clicked = false;
 
-                    if toolbar_placement == EffectiveToolbarPlacement::Top {
-                        let very_narrow = window_width < 320.0;
-                        for (view, icon, label) in [
-                            (AppView::Editor, Icon::Editor, "Editor"),
-                            (AppView::NotesList, Icon::Notes, "Notes"),
-                            (AppView::Graph, Icon::Graph, "Knowledge graph"),
-                            (AppView::Trash, Icon::Trash, "Recovery"),
-                            (AppView::Settings, Icon::Settings, "Settings"),
-                        ] {
-                            if very_narrow && matches!(view, AppView::Trash | AppView::Settings) {
-                                continue;
-                            }
-                            if ui_style::navigation_button(
+                    // 1. Right-side window controls & tools allocated FIRST:
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui_style::icon_button(ui, Icon::Close, false, "Close Lilo").clicked() {
+                            close_clicked = true;
+                        }
+                        if window_width >= 360.0
+                            && ui_style::icon_button(
                                 ui,
-                                icon,
-                                self.view == view,
-                                label,
+                                Icon::Maximize,
                                 false,
+                                "Maximize / restore",
                             )
                             .clicked()
-                            {
-                                self.activate_view(view);
+                        {
+                            max_clicked = true;
+                        }
+                        if window_width >= 360.0
+                            && ui_style::icon_button(ui, Icon::Minimize, false, "Minimize")
+                                .clicked()
+                        {
+                            min_clicked = true;
+                        }
+
+                        // Always accessible Settings icon button!
+                        if ui_style::icon_button(
+                            ui,
+                            Icon::Settings,
+                            self.view == AppView::Settings,
+                            "Settings (Ctrl+,)",
+                        )
+                        .clicked()
+                        {
+                            settings_clicked = true;
+                        }
+
+                        // Zen mode button (wider windows)
+                        if window_width >= 540.0
+                            && ui_style::icon_button(
+                                ui,
+                                Icon::Editor,
+                                self.settings.zen_mode,
+                                "Zen / Writing Mode (F11)",
+                            )
+                            .clicked()
+                        {
+                            zen_clicked = true;
+                        }
+
+                        // Quick capture button (wider windows)
+                        if window_width >= 420.0
+                            && ui_style::icon_button(
+                                ui,
+                                Icon::Daily,
+                                false,
+                                "Quick capture (Ctrl+Shift+C)",
+                            )
+                            .clicked()
+                        {
+                            capture_clicked = true;
+                        }
+
+                        // Right Context Inspector toggle
+                        if self.view == AppView::Editor
+                            && window_width >= ui_style::WIDE_BREAKPOINT
+                            && ui_style::icon_button(
+                                ui,
+                                Icon::SidebarRight,
+                                effective_right_open,
+                                "Toggle context inspector (Ctrl+I)",
+                            )
+                            .clicked()
+                        {
+                            right_inspector_clicked = true;
+                        }
+
+                        // Search pill button on wider screens
+                        if window_width >= 620.0 {
+                            let search_btn = ui.add(
+                                egui::Button::new(
+                                    egui::RichText::new("🔍 Search (Ctrl+P)")
+                                        .small()
+                                        .color(ui.visuals().weak_text_color()),
+                                )
+                                .fill(ui.visuals().widgets.inactive.bg_fill)
+                                .corner_radius(egui::CornerRadius::same(6)),
+                            );
+                            if search_btn.clicked() {
+                                search_clicked = true;
                             }
                         }
-                        self.show_toolbar_menu(ui, very_narrow);
-                    }
 
-                    // Prevent egui's negative-size panic in narrow windows.
-                    let drag_width = (ui.available_width() - 32.0).max(0.0);
-                    let drag_area = ui.allocate_response(
-                        egui::vec2(drag_width, 30.0),
-                        egui::Sense::click_and_drag(),
-                    );
-                    let react = drag_area.rect;
-                    if drag_width > 48.0 {
-                        let (position, align) =
-                            if toolbar_placement == EffectiveToolbarPlacement::Top {
-                                (react.left_center(), egui::Align2::LEFT_CENTER)
-                            } else {
-                                (react.center(), egui::Align2::CENTER_CENTER)
-                            };
-                        ui.painter().text(
-                            position,
-                            align,
-                            current_title,
-                            egui::FontId::proportional(14.0),
-                            ui.visuals().weak_text_color(),
-                        );
+                        // 2. Left side & Drag Area in the remaining space (Never overlaps!):
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            // Left Explorer toggle
+                            if (effective_left_open || window_width >= ui_style::NAV_BREAKPOINT)
+                                && ui_style::icon_button(
+                                    ui,
+                                    Icon::SidebarLeft,
+                                    effective_left_open,
+                                    "Toggle explorer (Ctrl+B)",
+                                )
+                                .clicked()
+                            {
+                                self.settings.left_sidebar_open = !self.settings.left_sidebar_open;
+                                self.save_settings();
+                            }
+
+                            if ui.available_width() >= 40.0 {
+                                ui.label(egui::RichText::new("Lilo").strong().size(14.0));
+                            }
+
+                            // Quick navigation icons if left sidebar is hidden
+                            if !effective_left_open {
+                                let rem_w = ui.available_width();
+                                if rem_w >= 260.0 {
+                                    for (v, icon, label) in [
+                                        (AppView::Editor, Icon::Editor, "Editor"),
+                                        (AppView::NotesList, Icon::Notes, "Notes"),
+                                        (AppView::Graph, Icon::Graph, "Graph"),
+                                        (AppView::Trash, Icon::Trash, "Trash"),
+                                    ] {
+                                        if ui_style::navigation_button(
+                                            ui,
+                                            icon,
+                                            self.view == v,
+                                            label,
+                                            false,
+                                        )
+                                        .clicked()
+                                        {
+                                            self.activate_view(v);
+                                        }
+                                    }
+                                } else if rem_w >= 140.0 {
+                                    for (v, icon, label) in [
+                                        (AppView::Editor, Icon::Editor, "Editor"),
+                                        (AppView::NotesList, Icon::Notes, "Notes"),
+                                        (AppView::Graph, Icon::Graph, "Graph"),
+                                        (AppView::Trash, Icon::Trash, "Trash"),
+                                    ] {
+                                        if ui_style::icon_button(ui, icon, self.view == v, label)
+                                            .clicked()
+                                        {
+                                            self.activate_view(v);
+                                        }
+                                    }
+                                } else if rem_w >= 60.0 {
+                                    for (v, icon, label) in [
+                                        (AppView::Editor, Icon::Editor, "Editor"),
+                                        (AppView::NotesList, Icon::Notes, "Notes"),
+                                    ] {
+                                        if ui_style::icon_button(ui, icon, self.view == v, label)
+                                            .clicked()
+                                        {
+                                            self.activate_view(v);
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Remaining space becomes Draggable Title Region (Handles Window Dragging & Double Click)
+                            let drag_width = ui.available_width().max(0.0);
+                            if drag_width > 8.0 {
+                                let drag_area = ui.allocate_response(
+                                    egui::vec2(drag_width, 28.0),
+                                    egui::Sense::click_and_drag(),
+                                );
+                                let rect = drag_area.rect;
+                                if drag_width > 80.0 {
+                                    let note_title =
+                                        self.data.selected_note().map_or("Lilo", |n| {
+                                            if n.title.trim().is_empty() {
+                                                "Untitled"
+                                            } else {
+                                                n.title.as_str()
+                                            }
+                                        });
+                                    ui.painter().text(
+                                        rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        note_title,
+                                        egui::FontId::proportional(13.0),
+                                        ui.visuals().weak_text_color(),
+                                    );
+                                }
+                                if drag_area.drag_started() {
+                                    ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                                }
+                                if drag_area.double_clicked() {
+                                    let maximized = ctx
+                                        .input(|input| input.viewport().maximized.unwrap_or(false));
+                                    ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(
+                                        !maximized,
+                                    ));
+                                }
+                            }
+                        });
+                    });
+
+                    if close_clicked {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
-                    if drag_area.drag_started() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                    }
-                    if drag_area.double_clicked() {
+                    if max_clicked {
                         let maximized =
                             ctx.input(|input| input.viewport().maximized.unwrap_or(false));
                         ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
                     }
-                    if window_width >= 430.0
-                        && ui_style::icon_button(ui, Icon::Minimize, false, "Minimize").clicked()
-                    {
+                    if min_clicked {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                     }
-                    if window_width >= 430.0
-                        && ui_style::icon_button(ui, Icon::Maximize, false, "Maximize / restore")
-                            .clicked()
-                    {
-                        let maximized =
-                            ctx.input(|input| input.viewport().maximized.unwrap_or(false));
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+                    if settings_clicked {
+                        self.activate_view(AppView::Settings);
                     }
-                    if ui_style::icon_button(ui, Icon::Close, false, "Close Lilo").clicked() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    if zen_clicked {
+                        self.settings.zen_mode = !self.settings.zen_mode;
+                        self.save_settings();
+                    }
+                    if capture_clicked {
+                        self.quick_capture_state.open();
+                    }
+                    if right_inspector_clicked {
+                        self.settings.right_sidebar_open = !self.settings.right_sidebar_open;
+                        self.save_settings();
+                    }
+                    if search_clicked {
+                        self.command_palette_state.open();
                     }
                 });
             });
 
-        let expanded_navigation =
-            self.settings.toolbar_expanded && window_width >= ui_style::EXPANDED_NAV_BREAKPOINT;
-        let navigation_width = if expanded_navigation {
-            ui_style::NAV_PANEL_WIDTH
-        } else {
-            ui_style::NAV_RAIL_WIDTH
-        };
-        match toolbar_placement {
-            EffectiveToolbarPlacement::Left => {
-                egui::Panel::left("navigation_rail_left")
-                    .exact_size(navigation_width)
-                    .resizable(false)
-                    .show(ui, |ui| {
-                        ui.vertical_centered(|ui| {
-                            self.show_navigation_buttons(ui, expanded_navigation);
-                            ui.add_space(8.0);
-                            self.show_toolbar_menu(ui, false);
-                        });
-                    });
-            }
-            EffectiveToolbarPlacement::Right => {
-                egui::Panel::right("navigation_rail_right")
-                    .exact_size(navigation_width)
-                    .resizable(false)
-                    .show(ui, |ui| {
-                        ui.vertical_centered(|ui| {
-                            self.show_navigation_buttons(ui, expanded_navigation);
-                            ui.add_space(8.0);
-                            self.show_toolbar_menu(ui, false);
-                        });
-                    });
-            }
-            EffectiveToolbarPlacement::Floating => {
-                let position = egui::pos2(
-                    self.settings.floating_toolbar_position[0],
-                    self.settings.floating_toolbar_position[1],
-                );
-                let vertical = self.settings.floating_toolbar_vertical;
-                let response = egui::Area::new(egui::Id::new("floating_navigation"))
-                    .order(egui::Order::Foreground)
-                    .movable(true)
-                    .constrain(true)
-                    .default_pos(position)
-                    .show(&ctx, |ui| {
-                        egui::Frame::window(ui.style()).show(ui, |ui| {
-                            if vertical {
-                                ui.vertical_centered(|ui| {
-                                    ui.small("::::").on_hover_text("Drag toolbar");
-                                    self.show_navigation_buttons(
-                                        ui,
-                                        self.settings.toolbar_expanded,
-                                    );
-                                    self.show_toolbar_menu(ui, false);
-                                });
-                            } else {
-                                ui.horizontal(|ui| {
-                                    ui.small("::::").on_hover_text("Drag toolbar");
-                                    self.show_navigation_buttons(ui, false);
-                                    self.show_toolbar_menu(ui, false);
-                                });
-                            }
-                        });
-                    });
-                let toolbar_rect = response.response.rect;
-                self.settings.floating_toolbar_position = [toolbar_rect.min.x, toolbar_rect.min.y];
-                if response.response.drag_stopped() {
-                    let content = ctx.content_rect();
-                    if toolbar_rect.left() <= content.left() + 16.0 {
-                        self.settings.toolbar_placement = ToolbarPlacement::Left;
-                    } else if toolbar_rect.right() >= content.right() - 16.0 {
-                        self.settings.toolbar_placement = ToolbarPlacement::Right;
-                    } else if toolbar_rect.top() <= content.top() + ui_style::TOP_BAR_HEIGHT + 12.0
-                    {
-                        self.settings.toolbar_placement = ToolbarPlacement::Top;
+        // Left Panel (Navigator / Explorer - Layer 1)
+        if effective_left_open {
+            egui::Panel::left("left_explorer_panel")
+                .default_size(self.settings.sidebar_width)
+                .min_size(200.0)
+                .max_size(420.0)
+                .resizable(true)
+                .frame(
+                    egui::Frame::new()
+                        .fill(ui_style::layer1_color(dark_theme))
+                        .inner_margin(egui::Margin::same(10)),
+                )
+                .show(ui, |ui| {
+                    self.show_left_explorer(ui);
+                });
+        }
+
+        // Right Panel (Context Inspector - Layer 1)
+        if effective_right_open {
+            egui::Panel::right("right_inspector_panel")
+                .default_size(ui_style::INSPECTOR_PANEL_WIDTH)
+                .min_size(200.0)
+                .max_size(380.0)
+                .resizable(true)
+                .frame(
+                    egui::Frame::new()
+                        .fill(ui_style::layer1_color(dark_theme))
+                        .inner_margin(egui::Margin::same(10)),
+                )
+                .show(ui, |ui| {
+                    if let Some(note) = self.data.selected_note() {
+                        self.show_right_inspector(ui, &note.clone());
                     }
-                    self.save_settings();
-                }
-            }
-            EffectiveToolbarPlacement::Top => {}
+                });
+        }
+
+        // Bottom Status Bar (Layer 1)
+        if effective_status_bar {
+            egui::Panel::bottom("bottom_status_bar")
+                .exact_size(ui_style::BOTTOM_BAR_HEIGHT)
+                .frame(
+                    egui::Frame::new()
+                        .fill(ui_style::layer1_color(dark_theme))
+                        .inner_margin(egui::Margin::symmetric(12, 4)),
+                )
+                .show(ui, |ui| {
+                    self.show_bottom_status_bar(ui);
+                });
         }
 
         if self.external_conflict {
@@ -2137,195 +3304,264 @@ impl eframe::App for WidgetApp {
             });
         }
 
-        if let Some(message) = self.storage_message.clone() {
-            let is_error = ["failed", "cannot", "could not", "invalid", "conflict"]
-                .iter()
-                .any(|word| message.to_lowercase().contains(word));
-            egui::Panel::bottom("status_message").show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.colored_label(ui_style::status_color(ui.visuals(), is_error), message);
-                    if ui_style::icon_button(ui, Icon::Close, false, "Dismiss message").clicked() {
-                        self.storage_message = None;
-                    }
-                });
-            });
-        }
-
-        let content_margin = if window_width >= ui_style::NAV_BREAKPOINT {
-            24
+        // Central Panel (Layer 0 Background with Elevated Note Card)
+        let canvas_fill = if dark_theme {
+            egui::Color32::from_rgb(15, 17, 24)
         } else {
-            ui_style::PANEL_MARGIN
-        };
-        let content_fill = if dark_theme {
-            egui::Color32::from_rgb(23, 26, 33)
-        } else {
-            egui::Color32::WHITE
+            egui::Color32::from_rgb(242, 244, 248)
         };
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
-                    .fill(content_fill)
-                    .inner_margin(egui::Margin::same(content_margin)),
+                    .fill(canvas_fill)
+                    .inner_margin(egui::Margin::symmetric(
+                        if window_width < 650.0 { 8 } else { 16 },
+                        if window_width < 650.0 { 8 } else { 12 },
+                    )),
             )
             .show(ui, |ui| {
                 match self.view {
                     AppView::Editor => {
-                        ui.set_max_width(ui.available_width().min(920.0));
-                        ui.add_space(4.0);
-                        let mut changed_note_id = None;
-                        let mut note_name_changed = false;
-                        let mut note_content_changed = false;
-                        let mut activated_link_target = None;
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                let total_available_w = ui.available_width();
+                                let total_available_h = ui.available_height();
+                                let is_wide = total_available_w > 820.0;
+                                let sheet_width = if is_wide {
+                                    self.settings.editor_max_width.min(total_available_w - 32.0)
+                                } else {
+                                    total_available_w
+                                };
 
-                        if let Some(note) = self.data.selected_note_mut() {
-                            let title_response = ui.add(
-                                egui::TextEdit::singleline(&mut note.title)
-                                    .font(egui::FontId::proportional(22.0))
-                                    .frame(egui::Frame::NONE)
-                                    .desired_width(f32::INFINITY)
-                                    .hint_text("Note title..."),
-                            );
+                                ui.vertical_centered(|ui| {
+                                    ui.set_max_width(sheet_width);
+                                    ui.set_min_width(sheet_width);
 
-                            ui.add_space(6.0);
+                                    let card_fill = if dark_theme {
+                                        egui::Color32::from_rgb(22, 25, 35)
+                                    } else {
+                                        egui::Color32::WHITE
+                                    };
+                                    let card_stroke = egui::Stroke::new(
+                                        1.0,
+                                        if dark_theme {
+                                            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 14)
+                                        } else {
+                                            egui::Color32::from_rgba_unmultiplied(0, 0, 0, 18)
+                                        },
+                                    );
 
-                            // UUID preserves cursor and undo state between frames.
-                            let editor_id = ui.make_persistent_id(("markdown_editor", note.id));
-                            let mut markdown_command = None;
+                                    egui::Frame::new()
+                                        .fill(card_fill)
+                                        .stroke(card_stroke)
+                                        .corner_radius(egui::CornerRadius::same(10))
+                                        .inner_margin(egui::Margin::symmetric(
+                                            if is_wide { 24 } else { 14 },
+                                            16,
+                                        ))
+                                        .show(ui, |ui| {
+                                            ui.set_min_height((total_available_h - 16.0).max(300.0));
+                                            ui.with_layout(
+                                                egui::Layout::top_down(egui::Align::LEFT),
+                                                |ui| {
+                                                    let mut changed_note_id = None;
+                                                    let mut note_name_changed = false;
+                                                    let mut note_content_changed = false;
+                                                    let mut activated_link_target = None;
 
-                            let editor_focused = ui.memory(|memory| memory.has_focus(editor_id));
-                            if editor_focused {
-                                if ui.input(|input| {
-                                    input.modifiers.command && input.key_pressed(egui::Key::B)
-                                }) {
-                                    markdown_command = Some(markdown::MarkdownCommand::Bold);
-                                } else if ui.input(|input| {
-                                    input.modifiers.command && input.key_pressed(egui::Key::I)
-                                }) {
-                                    markdown_command = Some(markdown::MarkdownCommand::Italic);
-                                } else if ui.input(|input| {
-                                    input.modifiers.command && input.key_pressed(egui::Key::K)
-                                }) {
-                                    markdown_command = Some(markdown::MarkdownCommand::WikiLink);
-                                }
-                            }
+                                                    let is_daily = self
+                                                        .data
+                                                        .selected_note()
+                                                        .is_some_and(|n| self.is_daily_note(n));
+                                                    let mut daily_nav_delta = None;
 
-                            let mut command_changed = markdown_command.is_some_and(|command| {
-                                markdown::apply_command(
-                                    ui.ctx(),
-                                    editor_id,
-                                    &mut note.content,
-                                    command,
-                                )
+                                                    if let Some(note) = self.data.selected_note_mut() {
+                                                        // Daily Notes Navigation Banner
+                                                        if is_daily {
+                                                            let note_title = note.title.clone();
+                                                            ui.horizontal(|ui| {
+                                                                if ui
+                                                                    .button("← Yesterday")
+                                                                    .on_hover_text("Open yesterday's daily note")
+                                                                    .clicked()
+                                                                {
+                                                                    daily_nav_delta = Some(-1);
+                                                                }
+                                                                ui.label(
+                                                                    egui::RichText::new(format!("📅 {note_title}"))
+                                                                        .strong()
+                                                                        .color(ui.visuals().hyperlink_color),
+                                                                );
+                                                                if ui
+                                                                    .button("Tomorrow →")
+                                                                    .on_hover_text("Open tomorrow's daily note")
+                                                                    .clicked()
+                                                                {
+                                                                    daily_nav_delta = Some(1);
+                                                                }
+                                                            });
+                                                            ui.add_space(6.0);
+                                                        }
+
+                                                        // Title Box (clean, frameless, natural)
+                                                        let title_response = ui.add(
+                                                            egui::TextEdit::singleline(&mut note.title)
+                                                                .font(egui::FontId::proportional(22.0))
+                                                                .frame(egui::Frame::NONE)
+                                                                .desired_width(f32::INFINITY)
+                                                                .hint_text("Note title..."),
+                                                        );
+
+                                                        ui.add_space(6.0);
+                                                        ui.separator();
+                                                        ui.add_space(6.0);
+
+                                                        let editor_id = ui.make_persistent_id(("markdown_editor", note.id));
+
+                                                        if let Some((target_note_id, char_idx)) = self.pending_cursor_char_index
+                                                            && target_note_id == note.id
+                                                        {
+                                                            markdown::set_cursor_char_index(ui.ctx(), editor_id, char_idx);
+                                                            self.pending_cursor_char_index = None;
+                                                        }
+
+                                                        let mut markdown_command = None;
+                                                        let editor_focused = ui.memory(|memory| memory.has_focus(editor_id));
+                                                        if editor_focused {
+                                                            if ui.input(|input| {
+                                                                input.modifiers.command && input.key_pressed(egui::Key::B)
+                                                            }) {
+                                                                markdown_command = Some(markdown::MarkdownCommand::Bold);
+                                                            } else if ui.input(|input| {
+                                                                input.modifiers.command && input.key_pressed(egui::Key::I)
+                                                            }) {
+                                                                markdown_command = Some(markdown::MarkdownCommand::Italic);
+                                                            }
+                                                        }
+
+                                                        let mut command_changed = markdown_command.is_some_and(|command| {
+                                                            markdown::apply_command(
+                                                                ui.ctx(),
+                                                                editor_id,
+                                                                &mut note.content,
+                                                                command,
+                                                            )
+                                                        });
+
+                                                        if editor_focused
+                                                            && ui.input(|input| {
+                                                                input.modifiers.is_none() && input.key_pressed(egui::Key::Enter)
+                                                            })
+                                                            && markdown::continue_list_at_cursor(
+                                                                ui.ctx(),
+                                                                editor_id,
+                                                                &mut note.content,
+                                                            )
+                                                        {
+                                                            ui.input_mut(|input| {
+                                                                input.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+                                                            });
+                                                            command_changed = true;
+                                                        }
+
+                                                        let editor_output = markdown::show_editor(
+                                                            ui,
+                                                            &mut note.content,
+                                                            editor_id,
+                                                            self.settings.editor_font_size,
+                                                        );
+
+                                                        let hovered_character = markdown::hovered_character(ui, &editor_output);
+                                                        let checkbox_toggled =
+                                                            hovered_character.is_some_and(|character_index| {
+                                                                editor_output.response.clicked()
+                                                                    && !ui.input(|input| input.modifiers.command)
+                                                                    && markdown::toggle_checkbox_at_character(
+                                                                        &mut note.content,
+                                                                        character_index,
+                                                                    )
+                                                            });
+
+                                                        if let Some(character_index) = hovered_character
+                                                            && let Some(wiki_link) =
+                                                                links::wiki_link_at_character(&note.content, character_index)
+                                                        {
+                                                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                                            editor_output
+                                                                .response
+                                                                .response
+                                                                .clone()
+                                                                .on_hover_text(format!(
+                                                                    "Double-click or Ctrl+Click to open [[{}]]",
+                                                                    wiki_link.target
+                                                                ));
+
+                                                            let double_clicked = editor_output.response.double_clicked();
+                                                            let command_clicked = editor_output.response.clicked()
+                                                                && ui.input(|input| input.modifiers.command);
+                                                            if double_clicked || command_clicked {
+                                                                activated_link_target = Some(wiki_link.target);
+                                                            }
+                                                        }
+
+                                                        let content_response = editor_output.response;
+
+                                                        if self.focus_editor {
+                                                            content_response.request_focus();
+                                                            self.focus_editor = false;
+                                                        }
+
+                                                        note_name_changed = title_response.changed();
+                                                        note_content_changed =
+                                                            content_response.changed() || checkbox_toggled || command_changed;
+                                                        if note_name_changed || note_content_changed {
+                                                            note.mark_as_updated();
+                                                            changed_note_id = Some(note.id);
+                                                        }
+                                                    } else {
+                                                        ui.label("No notes yet.");
+                                                        if ui.button("Create note").clicked() {
+                                                            self.create_note();
+                                                        }
+                                                    }
+
+                                                    if let Some(id) = changed_note_id {
+                                                        if note_name_changed {
+                                                            self.pending_title_rename_ids.insert(id);
+                                                            self.link_index = LinkIndex::build(
+                                                                &self.data.notes,
+                                                                &self.storage_paths.notes_dir,
+                                                            );
+                                                        } else if note_content_changed
+                                                            && let Some(note) =
+                                                                self.data.notes.iter().find(|note| note.id == id)
+                                                        {
+                                                            self.link_index.refresh_note_content(note);
+                                                        }
+                                                        self.mark_note_dirty(id);
+                                                    }
+
+                                                    if let Some(target) = activated_link_target {
+                                                        match self.link_index.resolve_target(&target) {
+                                                            LinkResolution::Resolved(id) => self.open_note(id),
+                                                            LinkResolution::Missing => self.create_note_from_link(&target),
+                                                            LinkResolution::Ambiguous => {
+                                                                self.storage_message = Some(format!(
+                                                                    "Cannot open [[{target}]]: more than one note has this name"
+                                                                ));
+                                                            }
+                                                        }
+                                                    }
+
+                                                    if let Some(delta) = daily_nav_delta {
+                                                        self.open_or_create_daily_note(delta);
+                                                    }
+                                                },
+                                            );
+                                        });
+                                });
                             });
-                            if editor_focused
-                                && ui.input(|input| {
-                                    input.modifiers.is_none() && input.key_pressed(egui::Key::Enter)
-                                })
-                                && markdown::continue_list_at_cursor(
-                                    ui.ctx(),
-                                    editor_id,
-                                    &mut note.content,
-                                )
-                            {
-                                ui.input_mut(|input| {
-                                    input.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
-                                });
-                                command_changed = true;
-                            }
-
-                            let editor_output = markdown::show_editor(
-                                ui,
-                                &mut note.content,
-                                editor_id,
-                                self.settings.font_size,
-                            );
-
-                            let hovered_character = markdown::hovered_character(ui, &editor_output);
-                            let checkbox_toggled =
-                                hovered_character.is_some_and(|character_index| {
-                                    editor_output.response.clicked()
-                                        && !ui.input(|input| input.modifiers.command)
-                                        && markdown::toggle_checkbox_at_character(
-                                            &mut note.content,
-                                            character_index,
-                                        )
-                                });
-
-                            if let Some(character_index) = hovered_character
-                                && let Some(wiki_link) =
-                                    links::wiki_link_at_character(&note.content, character_index)
-                            {
-                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                                editor_output
-                                    .response
-                                    .response
-                                    .clone()
-                                    .on_hover_text(format!(
-                                        "Ctrl+Click to open [[{}]]",
-                                        wiki_link.target
-                                    ));
-
-                                let command_clicked = editor_output.response.clicked()
-                                    && ui.input(|input| input.modifiers.command);
-                                if command_clicked {
-                                    activated_link_target = Some(wiki_link.target);
-                                }
-                            }
-
-                            let content_response = editor_output.response;
-
-                            if self.focus_editor {
-                                content_response.request_focus();
-                                self.focus_editor = false;
-                            }
-
-                            note_name_changed = title_response.changed();
-                            note_content_changed =
-                                content_response.changed() || checkbox_toggled || command_changed;
-                            if note_name_changed || note_content_changed {
-                                note.mark_as_updated();
-                                changed_note_id = Some(note.id);
-                            }
-                        } else {
-                            ui.label("No notes yet.");
-                            if ui.button("Create note").clicked() {
-                                self.create_note();
-                            }
-                        }
-
-                        if let Some(id) = changed_note_id {
-                            if note_name_changed {
-                                self.pending_title_rename_ids.insert(id);
-                                // Renaming can change link resolution across the vault.
-                                self.link_index = LinkIndex::build(
-                                    &self.data.notes,
-                                    &self.storage_paths.notes_dir,
-                                );
-                            } else if note_content_changed
-                                && let Some(note) =
-                                    self.data.notes.iter().find(|note| note.id == id)
-                            {
-                                // Content edits only require reparsing this note.
-                                self.link_index.refresh_note_content(note);
-                            }
-                            self.mark_note_dirty(id);
-                        }
-
-                        if let Some(target) = activated_link_target {
-                            match self.link_index.resolve_target(&target) {
-                                LinkResolution::Resolved(id) => self.open_note(id),
-                                LinkResolution::Missing => self.create_note_from_link(&target),
-                                LinkResolution::Ambiguous => {
-                                    self.storage_message = Some(format!(
-                                        "Cannot open [[{target}]]: more than one note has this name"
-                                    ));
-                                }
-                            }
-                        }
-
-                        if let Some(note_id) = self.data.selected_note_id {
-                            self.show_editor_footer(ui, note_id);
-                        }
                     }
                     AppView::NotesList => self.show_notes_list(ui),
                     AppView::Graph => {
@@ -2387,6 +3623,149 @@ impl eframe::App for WidgetApp {
             if graph_output.is_some_and(|output| self.handle_graph_output(output)) {
                 self.graph_overlay_open = false;
             }
+        }
+
+        // Global note deletion confirmation dialog
+        if let Some(id) = self.pending_delete_id {
+            let note_title = self
+                .data
+                .notes
+                .iter()
+                .find(|n| n.id == id)
+                .map(|n| {
+                    if n.title.trim().is_empty() {
+                        "Untitled".to_string()
+                    } else {
+                        n.title.clone()
+                    }
+                })
+                .unwrap_or_else(|| "Note".to_string());
+            let center_pos = ui_style::screen_rect(&ctx).center();
+            egui::Window::new("Move to Trash")
+                .id(egui::Id::new("confirm_delete_note_modal"))
+                .collapsible(false)
+                .resizable(false)
+                .pivot(egui::Align2::CENTER_CENTER)
+                .default_pos(center_pos)
+                .show(&ctx, |ui| {
+                    ui.label(format!("Move note \"{note_title}\" to Trash?"));
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Move to Trash").clicked() {
+                            self.delete_note(id);
+                            self.pending_delete_id = None;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.pending_delete_id = None;
+                        }
+                    });
+                });
+        }
+
+        // Folder deletion confirmation dialog
+        if let Some(folder) = self.pending_folder_delete.clone() {
+            let center_pos = ui_style::screen_rect(&ctx).center();
+            egui::Window::new("Delete folder")
+                .id(egui::Id::new("confirm_delete_folder"))
+                .collapsible(false)
+                .resizable(false)
+                .pivot(egui::Align2::CENTER_CENTER)
+                .default_pos(center_pos)
+                .show(&ctx, |ui| {
+                    ui.label(format!(
+                        "Folder '{}' contains {} note(s).",
+                        folder.display(),
+                        self.pending_folder_notes_count
+                    ));
+                    ui.label("Move this folder and all its notes to Trash?");
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Move to Trash").clicked() {
+                            self.delete_folder(&folder);
+                            self.pending_folder_delete = None;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.pending_folder_delete = None;
+                        }
+                    });
+                });
+        }
+
+        // Template Selection Dialog
+        if self.template_selector_open {
+            let mut close = false;
+            let mut selected_template = None;
+            let templates = TemplateEngine::list_templates(
+                &self.storage_paths.notes_dir,
+                &self.settings.templates_folder,
+            );
+
+            let center_pos = ui_style::screen_rect(&ctx).center();
+            egui::Window::new(if self.template_selector_for_new_note {
+                "Select Template for New Note"
+            } else {
+                "Select Template to Insert"
+            })
+            .id(egui::Id::new("template_selector_modal"))
+            .collapsible(false)
+            .resizable(true)
+            .default_size(egui::vec2(320.0, 240.0))
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(center_pos)
+            .show(&ctx, |ui| {
+                if templates.is_empty() {
+                    ui.label("No templates found in Templates folder.");
+                    ui.small("Create .md files in your Templates directory to use them here.");
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                } else {
+                    egui::ScrollArea::vertical()
+                        .max_height(200.0)
+                        .show(ui, |ui| {
+                            for entry in templates {
+                                if ui.button(&entry.name).clicked() {
+                                    selected_template = Some(entry.name);
+                                    close = true;
+                                }
+                            }
+                        });
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                }
+            });
+
+            if let Some(t_name) = selected_template {
+                if self.template_selector_for_new_note {
+                    self.create_note_from_template(&t_name);
+                } else {
+                    self.insert_template_into_active_note(&t_name);
+                }
+            }
+            if close {
+                self.template_selector_open = false;
+            }
+        }
+
+        // Modal Command Palette
+        if let Some(action) = commands::show_command_palette(&ctx, &mut self.command_palette_state)
+        {
+            self.handle_command_action(action);
+        }
+
+        // Modal Quick Capture
+        let capture_target_label = match self.settings.quick_capture_target {
+            QuickCaptureTarget::DailyNote => "Today's Daily Note",
+            QuickCaptureTarget::Inbox => "Inbox.md",
+            QuickCaptureTarget::NewNote => "New Note",
+        };
+        if let Some(submission) = quick_capture::show_quick_capture(
+            &ctx,
+            &mut self.quick_capture_state,
+            capture_target_label,
+        ) {
+            self.apply_quick_capture(submission);
         }
 
         self.save_after_debounce(&ctx);

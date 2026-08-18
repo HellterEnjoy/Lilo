@@ -110,27 +110,39 @@ Platform rules for all planned work:
 
 No note, frontmatter or settings format changed in this maintenance release.
 
-## 0.1.x — Stable MVP maintenance
+## 0.1.x — Stable MVP evolution
 
-**Status:** active maintenance.
+**Status:** complete with the `0.1.9` preview.
 
-The `0.1.x` line exists to support the released Stable MVP. Patch releases will be created only for concrete fixes discovered through real use, not to manufacture progress through version numbers.
+The `0.1.x` line established the released Stable MVP, its cross-platform foundation and the first complete daily-workflow implementation. Version `0.1.9` intentionally exposes that larger workflow before it is declared stable in `0.2.0`.
 
-Likely work includes data-safety fixes, Windows integration issues, compact-layout corrections, accessibility improvements and internal refactoring that does not alter visible behaviour or the vault format. New product areas listed below do not need to be forced into separate `0.1.x` releases.
+Further `0.1.x` releases are reserved for blocking data-safety, packaging or compatibility fixes found while testing `0.1.9`; no additional feature release is planned before `0.2.0`.
+
+## 0.1.9 — Daily Workflow Preview ✅
+
+- add local-date Daily Notes with configurable folders and portable date formats;
+- add previous, today and next-day navigation directly in compact and expanded layouts;
+- add declarative Markdown templates with a documented variable set;
+- add Quick Capture targeting the current Daily Note, Inbox or a new timestamped note;
+- add a fuzzy, keyboard-controlled Command Palette shared by existing and new actions;
+- add structured `tag:`, `path:`, `link:` and `title:` search filters;
+- add an expanded workspace with Explorer, contextual Inspector, heading outline and Zen mode;
+- add native application branding and current interface screenshots;
+- retain backwards-compatible Markdown notes and automatic JSON settings migration.
 
 ## 0.2.0 — Daily workflow
 
-**Status:** next feature milestone.
+**Status:** next stabilisation milestone.
 
 **User value:** Lilo becomes useful as something opened every day, not only as a place to store isolated notes.
 
-- open or create today's note with one command and configurable shortcut;
-- configure the daily-note folder and date-based title format;
-- create notes from ordinary Markdown templates;
-- support a small, documented variable set for date, time, title and cursor position;
-- choose an optional default template for daily notes;
-- add a keyboard-first quick-capture flow;
-- introduce a command palette shared by these actions and existing application commands.
+- stabilise the Daily Notes, templates, Quick Capture and Command Palette introduced in `0.1.9`;
+- complete keyboard-focus and compact-layout testing for every new creation flow;
+- verify date boundaries, invalid formats and settings migration on Windows and Linux;
+- refine errors and recovery behaviour for missing templates or externally changed target notes;
+- remove duplicate shortcuts and route remaining user actions consistently through the command registry;
+- profile startup, command matching and capture writes against realistically large vaults;
+- complete the accessibility, documentation and packaging pass required for a stable feature milestone.
 
 Templates remain declarative. They cannot execute scripts or hide required data outside the generated Markdown file.
 

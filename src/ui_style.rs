@@ -1,21 +1,30 @@
-//! Shared visual language for compact and expanded layouts.
+//! Shared visual language, 3-layer color depth, typography, and layout components.
 
 use eframe::egui::{
-    self, Align2, Color32, CornerRadius, FontId, Pos2, Rect, Response, RichText, Sense, Stroke,
-    StrokeKind, Ui, Vec2,
+    self, Align2, Color32, CornerRadius, CursorIcon, FontId, Pos2, Rect, Response, RichText, Sense,
+    Stroke, StrokeKind, TextStyle, Ui, Vec2, ViewportCommand, viewport::ResizeDirection,
 };
 
 pub const TOP_BAR_HEIGHT: f32 = 42.0;
+pub const BOTTOM_BAR_HEIGHT: f32 = 28.0;
 pub const TOOL_SIZE: f32 = 30.0;
 pub const PANEL_MARGIN: i8 = 10;
-pub const COMPACT_WIDTH: f32 = 430.0;
+pub const COMPACT_WIDTH: f32 = 600.0;
+pub const WIDE_BREAKPOINT: f32 = 860.0;
+#[allow(dead_code)]
+pub const EDITOR_SHEET_MAX_WIDTH: f32 = 780.0;
 
-pub const NAV_BREAKPOINT: f32 = 560.0;
-pub const EXPANDED_NAV_BREAKPOINT: f32 = 900.0;
+pub const NAV_BREAKPOINT: f32 = 600.0;
+#[allow(dead_code)]
+pub const EXPANDED_NAV_BREAKPOINT: f32 = 960.0;
+#[allow(dead_code)]
 pub const NAV_RAIL_WIDTH: f32 = 52.0;
-pub const NAV_PANEL_WIDTH: f32 = 176.0;
+#[allow(dead_code)]
+pub const NAV_PANEL_WIDTH: f32 = 260.0;
+pub const INSPECTOR_PANEL_WIDTH: f32 = 250.0;
 
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 pub enum Icon {
     Editor,
     Notes,
@@ -28,6 +37,38 @@ pub enum Icon {
     Minimize,
     Maximize,
     Close,
+    SidebarLeft,
+    SidebarRight,
+    Outline,
+    Backlinks,
+    Tag,
+    Calendar,
+    Daily,
+    Inbox,
+}
+
+pub fn layer0_color(dark: bool) -> Color32 {
+    if dark {
+        Color32::from_rgb(13, 15, 20) // Deep dark space (#0d0f14)
+    } else {
+        Color32::from_rgb(238, 240, 245)
+    }
+}
+
+pub fn layer1_color(dark: bool) -> Color32 {
+    if dark {
+        Color32::from_rgb(20, 23, 31) // Matte sidebar/bar (#14171f)
+    } else {
+        Color32::from_rgb(247, 248, 251)
+    }
+}
+
+pub fn layer2_color(dark: bool) -> Color32 {
+    if dark {
+        Color32::from_rgb(27, 31, 42) // Elevated editor sheet / modal (#1b1f2a)
+    } else {
+        Color32::WHITE
+    }
 }
 
 fn paint_icon(ui: &Ui, rect: Rect, icon: Icon, color: Color32) {
@@ -172,6 +213,150 @@ fn paint_icon(ui: &Ui, rect: Rect, icon: Icon, color: Color32) {
                 StrokeKind::Inside,
             );
         }
+        Icon::SidebarLeft => {
+            painter.rect_stroke(
+                Rect::from_center_size(center, Vec2::new(16.0, 14.0)),
+                CornerRadius::same(2),
+                stroke,
+                StrokeKind::Inside,
+            );
+            painter.line_segment(
+                [
+                    center + Vec2::new(-3.0, -7.0),
+                    center + Vec2::new(-3.0, 7.0),
+                ],
+                stroke,
+            );
+        }
+        Icon::SidebarRight => {
+            painter.rect_stroke(
+                Rect::from_center_size(center, Vec2::new(16.0, 14.0)),
+                CornerRadius::same(2),
+                stroke,
+                StrokeKind::Inside,
+            );
+            painter.line_segment(
+                [center + Vec2::new(3.0, -7.0), center + Vec2::new(3.0, 7.0)],
+                stroke,
+            );
+        }
+        Icon::Outline => {
+            for (y, w) in [(-5.0, 12.0), (-1.0, 8.0), (3.0, 10.0), (7.0, 6.0)] {
+                painter.line_segment(
+                    [center + Vec2::new(-6.0, y), center + Vec2::new(-6.0 + w, y)],
+                    stroke,
+                );
+            }
+        }
+        Icon::Backlinks => {
+            painter.line_segment(
+                [center + Vec2::new(-6.0, 0.0), center + Vec2::new(6.0, 0.0)],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    center + Vec2::new(-3.0, -4.0),
+                    center + Vec2::new(-6.0, 0.0),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [center + Vec2::new(-3.0, 4.0), center + Vec2::new(-6.0, 0.0)],
+                stroke,
+            );
+        }
+        Icon::Tag => {
+            painter.line_segment(
+                [
+                    center + Vec2::new(-6.0, -6.0),
+                    center + Vec2::new(2.0, -6.0),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [center + Vec2::new(2.0, -6.0), center + Vec2::new(6.0, -2.0)],
+                stroke,
+            );
+            painter.line_segment(
+                [center + Vec2::new(6.0, -2.0), center + Vec2::new(-2.0, 6.0)],
+                stroke,
+            );
+            painter.line_segment(
+                [center + Vec2::new(-2.0, 6.0), center + Vec2::new(-6.0, 2.0)],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    center + Vec2::new(-6.0, 2.0),
+                    center + Vec2::new(-6.0, -6.0),
+                ],
+                stroke,
+            );
+            painter.circle_filled(center + Vec2::new(-2.0, -2.0), 1.5, color);
+        }
+        Icon::Calendar => {
+            painter.rect_stroke(
+                Rect::from_center_size(center, Vec2::new(14.0, 14.0)),
+                CornerRadius::same(2),
+                stroke,
+                StrokeKind::Inside,
+            );
+            painter.line_segment(
+                [
+                    center + Vec2::new(-7.0, -3.0),
+                    center + Vec2::new(7.0, -3.0),
+                ],
+                Stroke::new(1.0, color),
+            );
+            painter.line_segment(
+                [
+                    center + Vec2::new(-4.0, -7.0),
+                    center + Vec2::new(-4.0, -5.0),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [center + Vec2::new(4.0, -7.0), center + Vec2::new(4.0, -5.0)],
+                stroke,
+            );
+        }
+        Icon::Daily => {
+            painter.rect_stroke(
+                Rect::from_center_size(center, Vec2::new(14.0, 14.0)),
+                CornerRadius::same(3),
+                stroke,
+                StrokeKind::Inside,
+            );
+            painter.circle_filled(center + Vec2::new(0.0, 1.0), 2.2, color);
+        }
+        Icon::Inbox => {
+            painter.rect_stroke(
+                Rect::from_center_size(center, Vec2::new(15.0, 13.0)),
+                CornerRadius::same(2),
+                stroke,
+                StrokeKind::Inside,
+            );
+            painter.line_segment(
+                [center + Vec2::new(-7.5, 1.0), center + Vec2::new(-3.0, 1.0)],
+                Stroke::new(1.2, color),
+            );
+            painter.line_segment(
+                [center + Vec2::new(3.0, 1.0), center + Vec2::new(7.5, 1.0)],
+                Stroke::new(1.2, color),
+            );
+            painter.line_segment(
+                [center + Vec2::new(-3.0, 1.0), center + Vec2::new(-2.0, 4.0)],
+                Stroke::new(1.2, color),
+            );
+            painter.line_segment(
+                [center + Vec2::new(3.0, 1.0), center + Vec2::new(2.0, 4.0)],
+                Stroke::new(1.2, color),
+            );
+            painter.line_segment(
+                [center + Vec2::new(-2.0, 4.0), center + Vec2::new(2.0, 4.0)],
+                Stroke::new(1.2, color),
+            );
+        }
     }
 }
 
@@ -234,7 +419,7 @@ fn painted_button(
     response.on_hover_text(label)
 }
 
-pub fn apply_theme(ctx: &egui::Context, dark: bool, accent: Color32) {
+pub fn apply_theme(ctx: &egui::Context, dark: bool, accent: Color32, ui_font_size: f32) {
     let theme = if dark {
         egui::Theme::Dark
     } else {
@@ -248,36 +433,36 @@ pub fn apply_theme(ctx: &egui::Context, dark: bool, accent: Color32) {
         egui::Visuals::light()
     };
 
-    let (panel, surface, hover, border, text, muted) = if dark {
+    let _layer0 = layer0_color(dark);
+    let layer1 = layer1_color(dark);
+    let layer2 = layer2_color(dark);
+
+    let (hover, border, text, muted) = if dark {
         (
-            Color32::from_rgb(17, 19, 24),
-            Color32::from_rgb(27, 30, 38),
-            Color32::from_rgb(41, 47, 58),
-            Color32::from_rgb(42, 47, 56),
-            Color32::from_rgb(232, 234, 240),
-            Color32::from_rgb(143, 150, 163),
+            Color32::from_rgb(38, 44, 58),
+            Color32::from_rgb(36, 41, 54),
+            Color32::from_rgb(235, 238, 245),
+            Color32::from_rgb(140, 148, 165),
         )
     } else {
         (
-            Color32::from_rgb(246, 247, 250),
-            Color32::WHITE,
-            Color32::from_rgb(229, 233, 241),
-            Color32::from_rgb(210, 215, 225),
-            Color32::from_rgb(31, 35, 43),
-            Color32::from_rgb(104, 111, 124),
+            Color32::from_rgb(228, 232, 240),
+            Color32::from_rgb(218, 223, 232),
+            Color32::from_rgb(24, 28, 36),
+            Color32::from_rgb(105, 112, 128),
         )
     };
 
-    visuals.panel_fill = panel;
-    visuals.window_fill = surface;
-    visuals.extreme_bg_color = surface;
-    visuals.text_edit_bg_color = Some(surface);
+    visuals.panel_fill = layer1;
+    visuals.window_fill = layer2;
+    visuals.extreme_bg_color = layer2;
+    visuals.text_edit_bg_color = Some(Color32::TRANSPARENT);
     visuals.faint_bg_color = hover.gamma_multiply(0.45);
     visuals.code_bg_color = hover.gamma_multiply(0.65);
     visuals.override_text_color = Some(text);
     visuals.weak_text_color = Some(muted);
     visuals.hyperlink_color = accent;
-    visuals.selection.bg_fill = accent.gamma_multiply(0.55);
+    visuals.selection.bg_fill = accent.gamma_multiply(0.45);
     visuals.selection.stroke = Stroke::new(1.0, accent);
     visuals.window_corner_radius = CornerRadius::same(10);
     visuals.menu_corner_radius = CornerRadius::same(8);
@@ -286,7 +471,7 @@ pub fn apply_theme(ctx: &egui::Context, dark: bool, accent: Color32) {
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, border);
     visuals.widgets.noninteractive.corner_radius = CornerRadius::same(7);
     visuals.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
-    visuals.widgets.inactive.bg_fill = surface;
+    visuals.widgets.inactive.bg_fill = layer1;
     visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, border);
     visuals.widgets.inactive.corner_radius = CornerRadius::same(7);
     visuals.widgets.hovered.weak_bg_fill = hover;
@@ -307,7 +492,137 @@ pub fn apply_theme(ctx: &egui::Context, dark: bool, accent: Color32) {
     style.spacing.interact_size = Vec2::new(36.0, 30.0);
     style.spacing.window_margin = egui::Margin::same(PANEL_MARGIN);
     style.visuals = visuals;
+
+    // Dynamic UI Typography
+    style.text_styles = [
+        (TextStyle::Heading, FontId::proportional(ui_font_size + 6.0)),
+        (
+            TextStyle::Name("Title".into()),
+            FontId::proportional(ui_font_size + 4.0),
+        ),
+        (TextStyle::Body, FontId::proportional(ui_font_size)),
+        (TextStyle::Button, FontId::proportional(ui_font_size)),
+        (
+            TextStyle::Small,
+            FontId::proportional((ui_font_size - 2.0).max(9.0)),
+        ),
+        (TextStyle::Monospace, FontId::monospace(ui_font_size)),
+    ]
+    .into();
+
     ctx.set_style_of(theme, style);
+}
+
+pub fn screen_rect(ctx: &egui::Context) -> Rect {
+    ctx.input(|i| {
+        i.viewport()
+            .inner_rect
+            .or(i.raw.screen_rect)
+            .unwrap_or_else(|| Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0)))
+    })
+}
+
+/// Renders edge and corner resize handles for frameless windows.
+pub fn show_window_resize_handles(ctx: &egui::Context) {
+    let screen = screen_rect(ctx);
+    if screen.width() < 100.0 || screen.height() < 100.0 {
+        return;
+    }
+
+    let edge_thickness = 6.0;
+    let corner_size = 14.0;
+
+    let handles = [
+        // Corners
+        (
+            "resize_area_nw",
+            Rect::from_min_size(screen.min, Vec2::splat(corner_size)),
+            ResizeDirection::NorthWest,
+            CursorIcon::ResizeNorthWest,
+        ),
+        (
+            "resize_area_ne",
+            Rect::from_min_size(
+                Pos2::new(screen.max.x - corner_size, screen.min.y),
+                Vec2::splat(corner_size),
+            ),
+            ResizeDirection::NorthEast,
+            CursorIcon::ResizeNorthEast,
+        ),
+        (
+            "resize_area_sw",
+            Rect::from_min_size(
+                Pos2::new(screen.min.x, screen.max.y - corner_size),
+                Vec2::splat(corner_size),
+            ),
+            ResizeDirection::SouthWest,
+            CursorIcon::ResizeSouthWest,
+        ),
+        (
+            "resize_area_se",
+            Rect::from_min_size(
+                screen.max - Vec2::splat(corner_size),
+                Vec2::splat(corner_size),
+            ),
+            ResizeDirection::SouthEast,
+            CursorIcon::ResizeSouthEast,
+        ),
+        // Edges
+        (
+            "resize_area_n",
+            Rect::from_min_size(
+                Pos2::new(screen.min.x + corner_size, screen.min.y),
+                Vec2::new(screen.width() - corner_size * 2.0, edge_thickness),
+            ),
+            ResizeDirection::North,
+            CursorIcon::ResizeNorth,
+        ),
+        (
+            "resize_area_s",
+            Rect::from_min_size(
+                Pos2::new(screen.min.x + corner_size, screen.max.y - edge_thickness),
+                Vec2::new(screen.width() - corner_size * 2.0, edge_thickness),
+            ),
+            ResizeDirection::South,
+            CursorIcon::ResizeSouth,
+        ),
+        (
+            "resize_area_w",
+            Rect::from_min_size(
+                Pos2::new(screen.min.x, screen.min.y + corner_size),
+                Vec2::new(edge_thickness, screen.height() - corner_size * 2.0),
+            ),
+            ResizeDirection::West,
+            CursorIcon::ResizeWest,
+        ),
+        (
+            "resize_area_e",
+            Rect::from_min_size(
+                Pos2::new(screen.max.x - edge_thickness, screen.min.y + corner_size),
+                Vec2::new(edge_thickness, screen.height() - corner_size * 2.0),
+            ),
+            ResizeDirection::East,
+            CursorIcon::ResizeEast,
+        ),
+    ];
+
+    for (id_str, rect, direction, cursor) in handles {
+        egui::Area::new(egui::Id::new(id_str))
+            .order(egui::Order::Foreground)
+            .fixed_pos(rect.min)
+            .show(ctx, |ui| {
+                let response = ui.allocate_response(rect.size(), Sense::click_and_drag());
+                if response.hovered() {
+                    ctx.set_cursor_icon(cursor);
+                }
+                if response.drag_started()
+                    || (response.hovered()
+                        && ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)))
+                {
+                    ctx.send_viewport_cmd(ViewportCommand::BeginResize(direction));
+                }
+            });
+    }
 }
 
 pub fn icon_button(ui: &mut Ui, icon: Icon, selected: bool, label: &str) -> Response {
@@ -335,13 +650,72 @@ pub fn screen_title(ui: &mut Ui, title: &str) {
 
 pub fn card_frame(ui: &Ui) -> egui::Frame {
     egui::Frame::new()
-        .fill(ui.visuals().extreme_bg_color)
+        .fill(ui.visuals().window_fill)
         .stroke(Stroke::new(
             1.0,
             ui.visuals().widgets.inactive.bg_stroke.color,
         ))
         .corner_radius(CornerRadius::same(8))
         .inner_margin(egui::Margin::symmetric(10, 8))
+}
+
+#[allow(dead_code)]
+pub fn sheet_frame(ui: &Ui) -> egui::Frame {
+    egui::Frame::new()
+        .fill(ui.visuals().window_fill)
+        .stroke(Stroke::new(
+            1.0,
+            ui.visuals().widgets.inactive.bg_stroke.color,
+        ))
+        .corner_radius(CornerRadius::same(12))
+        .inner_margin(egui::Margin::symmetric(24, 20))
+        .shadow(egui::Shadow {
+            offset: [0, 4],
+            blur: 16,
+            spread: 0,
+            color: Color32::from_black_alpha(100),
+        })
+}
+
+pub fn pill_frame(ui: &Ui, selected: bool) -> egui::Frame {
+    let fill = if selected {
+        ui.visuals().selection.bg_fill
+    } else {
+        ui.visuals().faint_bg_color
+    };
+    egui::Frame::new()
+        .fill(fill)
+        .stroke(Stroke::new(
+            1.0,
+            if selected {
+                ui.visuals().hyperlink_color
+            } else {
+                ui.visuals()
+                    .widgets
+                    .inactive
+                    .bg_stroke
+                    .color
+                    .gamma_multiply(0.5)
+            },
+        ))
+        .corner_radius(CornerRadius::same(12))
+        .inner_margin(egui::Margin::symmetric(8, 4))
+}
+
+pub fn paint_resize_grip(ui: &mut Ui) {
+    let rect = ui.available_rect_before_wrap();
+    let br = rect.max;
+    let stroke = Stroke::new(1.0, ui.visuals().weak_text_color().gamma_multiply(0.4));
+    let painter = ui.painter();
+    for offset in [4.0, 7.0, 10.0] {
+        painter.line_segment(
+            [
+                Pos2::new(br.x - offset, br.y),
+                Pos2::new(br.x, br.y - offset),
+            ],
+            stroke,
+        );
+    }
 }
 
 pub fn muted(ui: &mut Ui, text: impl Into<String>) -> Response {
@@ -352,6 +726,7 @@ pub fn muted(ui: &mut Ui, text: impl Into<String>) -> Response {
     )
 }
 
+#[allow(dead_code)]
 pub fn status_color(visuals: &egui::Visuals, is_error: bool) -> Color32 {
     if is_error {
         visuals.error_fg_color
