@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 pub type StorageResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
-const SETTINGS_VERSION: u32 = 5;
+const SETTINGS_VERSION: u32 = 6;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NoteSort {
@@ -37,6 +37,14 @@ pub enum ToolbarPlacement {
     Left,
     Right,
     Floating,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QuickCaptureTarget {
+    #[default]
+    DailyNote,
+    Inbox,
+    NewNote,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -78,6 +86,7 @@ struct NoteFrontmatter {
     pinned: bool,
 }
 
+#[derive(Clone)]
 pub struct Note {
     pub id: Uuid,
     pub title: String,
@@ -114,30 +123,6 @@ impl Note {
             created_at: now,
             updated_at: now,
             aliases: Vec::new(),
-            tags: Vec::new(),
-            pinned: false,
-            file_path,
-            search_text: String::new(),
-        };
-        note.refresh_search_text();
-        note
-    }
-
-    fn from_legacy(legacy: LegacyNote, notes_dir: &Path) -> Self {
-        let id = Uuid::new_v4();
-        let file_path = notes_dir.join(note_file_name(&legacy.title, id));
-        let aliases = if legacy.title.trim().is_empty() {
-            Vec::new()
-        } else {
-            vec![legacy.title.clone()]
-        };
-        let mut note = Self {
-            id,
-            title: legacy.title,
-            content: legacy.content,
-            created_at: legacy.created_at,
-            updated_at: legacy.updated_at,
-            aliases,
             tags: Vec::new(),
             pinned: false,
             file_path,
@@ -215,7 +200,7 @@ impl AppData {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(default)]
 pub struct AppSettings {
     pub version: u32,
@@ -227,6 +212,20 @@ pub struct AppSettings {
     pub note_sort: NoteSort,
     pub theme: ThemeChoice,
     pub font_size: f32,
+    pub left_sidebar_open: bool,
+    pub right_sidebar_open: bool,
+    pub editor_max_width: f32,
+    pub typewriter_mode: bool,
+    pub show_status_bar: bool,
+    pub editor_font_size: f32,
+    pub ui_font_size: f32,
+    pub sidebar_width: f32,
+    pub zen_mode: bool,
+    pub daily_notes_folder: PathBuf,
+    pub daily_note_format: String,
+    pub templates_folder: PathBuf,
+    pub default_daily_template: String,
+    pub quick_capture_target: QuickCaptureTarget,
     pub accent_rgb: [u8; 3],
     pub always_on_top: bool,
     pub autostart: bool,
@@ -254,13 +253,27 @@ impl Default for AppSettings {
             version: SETTINGS_VERSION,
             vault_path: PathBuf::new(),
             selected_note_id: None,
-            legacy_migration_completed: false,
+            legacy_migration_completed: true,
             selected_folder: PathBuf::new(),
             collapsed_folders: Vec::new(),
             note_sort: NoteSort::Updated,
             theme: ThemeChoice::Dark,
-            font_size: 15.0,
-            accent_rgb: [98, 160, 255],
+            font_size: 14.0,
+            left_sidebar_open: true,
+            right_sidebar_open: false,
+            editor_max_width: 780.0,
+            typewriter_mode: false,
+            show_status_bar: true,
+            editor_font_size: 14.0,
+            ui_font_size: 13.0,
+            sidebar_width: 260.0,
+            zen_mode: false,
+            daily_notes_folder: PathBuf::from("Daily"),
+            daily_note_format: "%Y-%m-%d".to_owned(),
+            templates_folder: PathBuf::from("Templates"),
+            default_daily_template: String::new(),
+            quick_capture_target: QuickCaptureTarget::DailyNote,
+            accent_rgb: [129, 140, 248],
             always_on_top: true,
             autostart: false,
             shortcuts: ShortcutSettings::default(),
@@ -280,6 +293,8 @@ pub struct StoragePaths {
     pub notes_dir: PathBuf,
     pub trash_dir: PathBuf,
     pub backups_dir: PathBuf,
+    #[allow(dead_code)]
+    pub cache_dir: PathBuf,
 }
 
 pub struct LoadedStorage {
@@ -287,7 +302,6 @@ pub struct LoadedStorage {
     pub settings: AppSettings,
     pub paths: StoragePaths,
     pub warnings: Vec<String>,
-    pub migrated_notes: usize,
     /// Paths relative to `Notes`; empty means the root.
     pub folder_paths: Vec<PathBuf>,
 }
@@ -298,9 +312,8 @@ pub fn load_storage() -> StorageResult<LoadedStorage> {
     let config_dir = project_dirs.config_dir().to_path_buf();
     fs::create_dir_all(&config_dir)?;
 
-    if let Some(legacy_dirs) = ProjectDirs::from("com", "Clown", "RustWidgets") {
-        copy_legacy_config(legacy_dirs.config_dir(), &config_dir)?;
-    }
+    let cache_dir = project_dirs.cache_dir().to_path_buf();
+    fs::create_dir_all(&cache_dir)?;
 
     let settings_path = config_dir.join("settings.json");
     let default_vault_path = default_vault_path(&config_dir);
@@ -310,22 +323,52 @@ pub fn load_storage() -> StorageResult<LoadedStorage> {
     }
     settings.version = SETTINGS_VERSION;
 
+    if settings.editor_font_size == 0.0 {
+        settings.editor_font_size = if settings.font_size > 0.0 {
+            settings.font_size
+        } else {
+            14.0
+        };
+    }
+    if settings.font_size == 0.0 {
+        settings.font_size = settings.editor_font_size;
+    }
+    if settings.ui_font_size == 0.0 {
+        settings.ui_font_size = 13.0;
+    }
+    if settings.sidebar_width == 0.0 {
+        settings.sidebar_width = 220.0;
+    }
+    if settings.daily_note_format.trim().is_empty() {
+        settings.daily_note_format = "%Y-%m-%d".to_owned();
+    }
+
     let notes_dir = settings.vault_path.join("Notes");
     let trash_dir = settings.vault_path.join("Trash");
     let backups_dir = settings.vault_path.join("Backups");
+    let templates_dir = if settings.templates_folder.as_os_str().is_empty() {
+        notes_dir.join("Templates")
+    } else {
+        notes_dir.join(&settings.templates_folder)
+    };
+    let daily_dir = if settings.daily_notes_folder.as_os_str().is_empty() {
+        notes_dir.join("Daily")
+    } else {
+        notes_dir.join(&settings.daily_notes_folder)
+    };
+
     fs::create_dir_all(&notes_dir)?;
     fs::create_dir_all(&trash_dir)?;
     fs::create_dir_all(&backups_dir)?;
+    let _ = fs::create_dir_all(&templates_dir);
+    let _ = fs::create_dir_all(&daily_dir);
 
-    let (mut notes, mut warnings, folder_paths) = load_notes(&notes_dir)?;
-    let mut migrated_notes = 0;
+    // Vault hidden .lilo/cache folder with .gitignore
+    let vault_lilo = settings.vault_path.join(".lilo");
+    let _ = fs::create_dir_all(vault_lilo.join("cache"));
+    let _ = fs::write(vault_lilo.join(".gitignore"), "*\n");
 
-    if !settings.legacy_migration_completed && notes.is_empty() {
-        let migration = migrate_legacy_notes(&config_dir, &notes_dir)?;
-        migrated_notes = migration.notes.len();
-        warnings.extend(migration.warnings);
-        notes = migration.notes;
-    }
+    let (mut notes, warnings, folder_paths) = load_notes(&notes_dir)?;
 
     settings.legacy_migration_completed = true;
     if !is_safe_relative_path(&settings.selected_folder)
@@ -359,9 +402,9 @@ pub fn load_storage() -> StorageResult<LoadedStorage> {
             notes_dir,
             trash_dir,
             backups_dir,
+            cache_dir,
         },
         warnings,
-        migrated_notes,
         folder_paths,
     })
 }
@@ -573,16 +616,57 @@ pub fn rename_folder(notes_dir: &Path, relative: &Path, new_name: &str) -> Stora
     Ok(destination_relative)
 }
 
+#[allow(dead_code)]
 pub fn delete_empty_folder(notes_dir: &Path, relative: &Path) -> StorageResult<()> {
     if relative.as_os_str().is_empty() || !is_safe_relative_path(relative) {
         return Err(io::Error::other("The Notes root cannot be deleted").into());
     }
     let target = notes_dir.join(relative);
     if fs::read_dir(&target)?.next().transpose()?.is_some() {
-        return Err(io::Error::other("Only empty folders can be deleted").into());
+        return Err(io::Error::other("Only empty folders can be deleted with this method").into());
     }
     fs::remove_dir(target)?;
     Ok(())
+}
+
+/// Safely deletes a folder by moving any notes inside it to Trash.
+pub fn delete_folder_with_trash(
+    notes_dir: &Path,
+    trash_dir: &Path,
+    relative: &Path,
+    notes: &[Note],
+) -> StorageResult<Vec<Uuid>> {
+    if relative.as_os_str().is_empty() || !is_safe_relative_path(relative) {
+        return Err(io::Error::other("The Notes root cannot be deleted").into());
+    }
+    let target = notes_dir.join(relative);
+    if !target.is_dir() {
+        return Err(io::Error::new(io::ErrorKind::NotFound, "Folder does not exist").into());
+    }
+
+    let mut trashed_ids = Vec::new();
+    let paths = StoragePaths {
+        settings_path: PathBuf::new(),
+        notes_dir: notes_dir.to_path_buf(),
+        trash_dir: trash_dir.to_path_buf(),
+        backups_dir: PathBuf::new(),
+        cache_dir: PathBuf::new(),
+    };
+
+    for note in notes {
+        if let Ok(rel) = note.file_path.strip_prefix(notes_dir)
+            && rel.starts_with(relative)
+        {
+            move_note_to_trash(note, &paths)?;
+            trashed_ids.push(note.id);
+        }
+    }
+
+    if target.exists() {
+        let _ = fs::remove_dir_all(&target);
+    }
+
+    Ok(trashed_ids)
 }
 
 #[derive(Clone)]
@@ -741,13 +825,12 @@ pub fn vault_snapshot(notes_dir: &Path) -> StorageResult<HashSet<(PathBuf, u128)
                 continue;
             }
             if file_type.is_dir() {
-                let modified = entry
-                    .metadata()?
-                    .modified()?
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos();
-                snapshot.insert((entry.path(), modified));
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.starts_with('.') || name_str.eq_ignore_ascii_case("cache") {
+                    continue;
+                }
+                snapshot.insert((entry.path(), 0));
                 directories.push(entry.path());
                 continue;
             }
@@ -968,20 +1051,6 @@ fn default_vault_path(config_dir: &Path) -> PathBuf {
         .join("LiloVault")
 }
 
-fn copy_legacy_config(legacy: &Path, current: &Path) -> StorageResult<()> {
-    if current.join("settings.json").exists() || !legacy.is_dir() || legacy == current {
-        return Ok(());
-    }
-    for name in ["settings.json", "notes.json", "note.json", "note.txt"] {
-        let source = legacy.join(name);
-        let destination = current.join(name);
-        if source.is_file() && !destination.exists() {
-            fs::copy(source, destination)?;
-        }
-    }
-    Ok(())
-}
-
 fn load_notes(notes_dir: &Path) -> StorageResult<(Vec<Note>, Vec<String>, Vec<PathBuf>)> {
     let mut paths = Vec::new();
     let mut folder_paths = vec![PathBuf::new()];
@@ -998,6 +1067,12 @@ fn load_notes(notes_dir: &Path) -> StorageResult<(Vec<Note>, Vec<String>, Vec<Pa
                 continue;
             }
             if file_type.is_dir() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.starts_with('.') || name_str.eq_ignore_ascii_case("cache") {
+                    continue;
+                }
+
                 let relative = path
                     .strip_prefix(notes_dir)
                     .map_err(|_| io::Error::other("Folder escaped Notes root"))?
@@ -1172,99 +1247,6 @@ fn load_note(path: &Path) -> StorageResult<Note> {
     Ok(note)
 }
 
-struct LegacyMigration {
-    notes: Vec<Note>,
-    warnings: Vec<String>,
-}
-
-fn migrate_legacy_notes(config_dir: &Path, notes_dir: &Path) -> StorageResult<LegacyMigration> {
-    let notes_json_path = config_dir.join("notes.json");
-    let note_json_path = config_dir.join("note.json");
-    let note_text_path = config_dir.join("note.txt");
-    let mut warnings = Vec::new();
-
-    let (legacy_notes, selected_legacy_id) = match fs::read_to_string(&notes_json_path) {
-        Ok(json) => match serde_json::from_str::<LegacyAppData>(&json) {
-            Ok(data) => (data.notes, data.selected_note_id),
-            Err(error) => {
-                warnings.push(format!(
-                    "Failed to parse {}: {}",
-                    notes_json_path.display(),
-                    error
-                ));
-                load_single_legacy_note(&note_json_path, &note_text_path, &mut warnings)?
-            }
-        },
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            load_single_legacy_note(&note_json_path, &note_text_path, &mut warnings)?
-        }
-        Err(error) => return Err(error.into()),
-    };
-
-    let mut selected_uuid = None;
-    let mut notes = Vec::new();
-    for legacy in legacy_notes {
-        let legacy_id = legacy.id;
-        let note = Note::from_legacy(legacy, notes_dir);
-        if selected_legacy_id == Some(legacy_id) {
-            selected_uuid = Some(note.id);
-        }
-        save_note(&note)?;
-        notes.push(note);
-    }
-
-    if selected_uuid.is_some() {
-        notes.sort_by_key(|note| note.id != selected_uuid.expect("selected UUID exists"));
-    }
-
-    Ok(LegacyMigration { notes, warnings })
-}
-
-fn load_single_legacy_note(
-    json_path: &Path,
-    text_path: &Path,
-    warnings: &mut Vec<String>,
-) -> StorageResult<(Vec<LegacyNote>, Option<u64>)> {
-    match fs::read_to_string(json_path) {
-        Ok(json) => match serde_json::from_str::<LegacyNote>(&json) {
-            Ok(note) => {
-                let id = note.id;
-                Ok((vec![note], Some(id)))
-            }
-            Err(error) => {
-                warnings.push(format!(
-                    "Failed to parse {}: {}",
-                    json_path.display(),
-                    error
-                ));
-                load_legacy_text(text_path)
-            }
-        },
-        Err(error) if error.kind() == io::ErrorKind::NotFound => load_legacy_text(text_path),
-        Err(error) => Err(error.into()),
-    }
-}
-
-fn load_legacy_text(path: &Path) -> StorageResult<(Vec<LegacyNote>, Option<u64>)> {
-    match fs::read_to_string(path) {
-        Ok(content) => {
-            let now = Local::now();
-            Ok((
-                vec![LegacyNote {
-                    id: 1,
-                    title: String::new(),
-                    content,
-                    created_at: now,
-                    updated_at: now,
-                }],
-                Some(1),
-            ))
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok((Vec::new(), None)),
-        Err(error) => Err(error.into()),
-    }
-}
-
 fn note_file_name(title: &str, id: Uuid) -> String {
     let sanitized = sanitize_file_stem(title);
     let id_text = id.simple().to_string();
@@ -1300,21 +1282,6 @@ fn sanitize_file_stem(title: &str) -> String {
     stem
 }
 
-#[derive(Deserialize)]
-struct LegacyNote {
-    id: u64,
-    title: String,
-    content: String,
-    created_at: DateTime<Local>,
-    updated_at: DateTime<Local>,
-}
-
-#[derive(Deserialize)]
-struct LegacyAppData {
-    notes: Vec<LegacyNote>,
-    selected_note_id: Option<u64>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1325,8 +1292,14 @@ mod tests {
             notes_dir: root.join("Notes"),
             trash_dir: root.join("Trash"),
             backups_dir: root.join("Backups"),
+            cache_dir: root.join("Cache"),
         };
-        for directory in [&paths.notes_dir, &paths.trash_dir, &paths.backups_dir] {
+        for directory in [
+            &paths.notes_dir,
+            &paths.trash_dir,
+            &paths.backups_dir,
+            &paths.cache_dir,
+        ] {
             fs::create_dir_all(directory).expect("create managed directory");
         }
         fs::write(&paths.settings_path, "{}").expect("create settings file");
@@ -1358,42 +1331,6 @@ mod tests {
         assert!(markdown.starts_with("---\n"));
         assert!(markdown.contains("\n---\n\nOwnership is connected"));
         assert!(!markdown.contains("search_text"));
-    }
-
-    #[test]
-    fn legacy_json_is_copied_to_markdown_without_deleting_source() {
-        let temp = tempfile::tempdir().expect("temporary directory");
-        let config_dir = temp.path().join("config");
-        let notes_dir = temp.path().join("vault").join("Notes");
-        fs::create_dir_all(&config_dir).expect("create config directory");
-        fs::create_dir_all(&notes_dir).expect("create Notes directory");
-
-        let now = Local::now().to_rfc3339();
-        let legacy_json = serde_json::json!({
-            "notes": [{
-                "id": 7,
-                "title": "Legacy note",
-                "content": "Old JSON content",
-                "created_at": now,
-                "updated_at": now
-            }],
-            "selected_note_id": 7,
-            "next_note_id": 8
-        });
-        let source_path = config_dir.join("notes.json");
-        fs::write(
-            &source_path,
-            serde_json::to_string_pretty(&legacy_json).expect("serialize legacy JSON"),
-        )
-        .expect("write legacy JSON");
-
-        let migration = migrate_legacy_notes(&config_dir, &notes_dir).expect("migrate legacy JSON");
-
-        assert_eq!(migration.notes.len(), 1);
-        assert_eq!(migration.notes[0].title, "Legacy note");
-        assert_eq!(migration.notes[0].content, "Old JSON content");
-        assert!(migration.notes[0].file_path.exists());
-        assert!(source_path.exists());
     }
 
     #[test]
@@ -1438,6 +1375,7 @@ mod tests {
             notes_dir,
             trash_dir: trash_dir.clone(),
             backups_dir: temp.path().join("Backups"),
+            cache_dir: temp.path().join("Cache"),
         };
 
         move_note_to_trash(&note, &paths).expect("move nested note to Trash");
@@ -1465,6 +1403,7 @@ mod tests {
             notes_dir: notes_dir.clone(),
             trash_dir: temp.path().join("Trash"),
             backups_dir: temp.path().join("Backups"),
+            cache_dir: temp.path().join("Cache"),
         };
 
         move_note_to_folder(&mut note, &paths, Path::new("Programming"))
@@ -1493,9 +1432,10 @@ mod tests {
     }
 
     #[test]
-    fn folders_can_be_renamed_and_only_empty_folders_deleted() {
+    fn folders_can_be_renamed_and_deleted_with_trash() {
         let temp = tempfile::tempdir().expect("temporary directory");
         let notes_dir = temp.path().join("Notes");
+        let trash_dir = temp.path().join("Trash");
         let folder = ensure_note_folder(&notes_dir, Path::new("Programming/Rust"))
             .expect("create nested folder");
         let note = Note::new_named(&folder, "Ownership");
@@ -1504,16 +1444,13 @@ mod tests {
         let renamed = rename_folder(&notes_dir, Path::new("Programming/Rust"), "Rust Notes")
             .expect("rename folder");
         assert_eq!(renamed, PathBuf::from("Programming/Rust Notes"));
-        assert!(delete_empty_folder(&notes_dir, &renamed).is_err());
 
-        fs::remove_file(
-            notes_dir
-                .join(&renamed)
-                .join(note.file_path.file_name().unwrap()),
-        )
-        .expect("remove note");
-        delete_empty_folder(&notes_dir, &renamed).expect("delete empty folder");
-        assert!(!notes_dir.join(renamed).exists());
+        // Delete with trash moves note to trash
+        let (notes, _, _) = load_notes(&notes_dir).expect("reload notes after rename");
+        let trashed = delete_folder_with_trash(&notes_dir, &trash_dir, &renamed, &notes)
+            .expect("delete with trash");
+        assert_eq!(trashed.len(), 1);
+        assert!(!notes_dir.join(&renamed).exists());
     }
 
     #[test]
@@ -1530,6 +1467,7 @@ mod tests {
             notes_dir: notes_dir.clone(),
             trash_dir,
             backups_dir,
+            cache_dir: temp.path().join("Cache"),
         };
 
         move_note_to_trash(&note, &paths).expect("trash note");
@@ -1676,10 +1614,17 @@ mod tests {
         assert_eq!(settings.shortcuts.graph_overlay, "Ctrl+Shift+G");
         assert_eq!(settings.toolbar_placement, ToolbarPlacement::Auto);
         assert_eq!(settings.floating_toolbar_position, [24.0, 72.0]);
+        assert_eq!(settings.editor_font_size, 14.0);
+        assert_eq!(settings.ui_font_size, 13.0);
+        assert_eq!(settings.sidebar_width, 260.0);
+        assert_eq!(settings.daily_notes_folder, PathBuf::from("Daily"));
+        assert_eq!(settings.daily_note_format, "%Y-%m-%d");
+        assert_eq!(settings.templates_folder, PathBuf::from("Templates"));
+        assert_eq!(settings.quick_capture_target, QuickCaptureTarget::DailyNote);
     }
 
     #[test]
-    fn vault_snapshot_detects_empty_folders() {
+    fn vault_snapshot_detects_empty_folders_and_ignores_cache() {
         let temp = tempfile::tempdir().expect("temporary directory");
         let notes_dir = temp.path().join("Notes");
         fs::create_dir_all(&notes_dir).expect("create Notes");
@@ -1688,6 +1633,11 @@ mod tests {
         let after = vault_snapshot(&notes_dir).expect("updated snapshot");
 
         assert_ne!(before, after);
+
+        // Cache folder should be ignored
+        fs::create_dir(notes_dir.join("Cache")).expect("create cache folder");
+        let after_cache = vault_snapshot(&notes_dir).expect("snapshot with cache");
+        assert_eq!(after, after_cache);
     }
 
     #[test]

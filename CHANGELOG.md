@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.9 — Daily Workflow Preview
+
+- added local-date Daily Notes with configurable folders, filename formats and previous/next-day navigation;
+- added Quick Capture with selectable Daily Note, Inbox or timestamped-note destinations;
+- added declarative Markdown templates for creating notes and inserting reusable content;
+- added `{{title}}`, `{{date}}`, `{{time}}`, `{{datetime}}`, `{{yesterday}}`, `{{tomorrow}}` and `{{cursor}}` template variables;
+- added a keyboard-first Command Palette with fuzzy command matching and grouped application actions;
+- added structured search operators for tags, folders, outgoing links and titles while preserving ordinary text search;
+- expanded the desktop workspace with collapsible Explorer and Inspector sidebars, Zen mode and editor zoom controls;
+- added a Markdown heading outline, word and character counts, and improved editor line spacing;
+- expanded settings for the daily workflow, editor typography, interface sizing and Quick Capture behaviour;
+- added application branding to the native window and Windows executable;
+- added a redesigned project README with current screenshots and workflow documentation;
+- preserved the existing Markdown vault structure and automatic settings migration.
+
 ## 0.1.1 — Cross-platform Stable MVP
 
 - split the application UI and orchestration out of `main.rs` while keeping the executable entry point small;
