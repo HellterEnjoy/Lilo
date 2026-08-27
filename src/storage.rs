@@ -39,12 +39,13 @@ pub enum ToolbarPlacement {
     Floating,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QuickCaptureTarget {
     #[default]
     DailyNote,
     Inbox,
     NewNote,
+    CustomNote(String),
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -55,6 +56,13 @@ pub struct ShortcutSettings {
     pub graph: String,
     pub graph_overlay: String,
     pub save: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchPreset {
+    pub id: Uuid,
+    pub name: String,
+    pub query: String,
 }
 
 impl Default for ShortcutSettings {
@@ -225,7 +233,17 @@ pub struct AppSettings {
     pub daily_note_format: String,
     pub templates_folder: PathBuf,
     pub default_daily_template: String,
+    pub attachments_folder: PathBuf,
     pub quick_capture_target: QuickCaptureTarget,
+    pub quick_capture_custom_note: String,
+    pub global_quick_capture_enabled: bool,
+    pub global_quick_capture_shortcut: String,
+    pub recent_commands: Vec<crate::commands::CommandAction>,
+    pub recent_note_ids: Vec<Uuid>,
+    pub sidebar_recent_open: bool,
+    pub search_presets: Vec<SearchPreset>,
+    pub tag_browser_expanded: bool,
+    pub saved_searches_expanded: bool,
     pub accent_rgb: [u8; 3],
     pub always_on_top: bool,
     pub autostart: bool,
@@ -271,8 +289,29 @@ impl Default for AppSettings {
             daily_notes_folder: PathBuf::from("Daily"),
             daily_note_format: "%Y-%m-%d".to_owned(),
             templates_folder: PathBuf::from("Templates"),
-            default_daily_template: String::new(),
+            default_daily_template: "Daily".to_owned(),
+            attachments_folder: PathBuf::from("Attachments"),
             quick_capture_target: QuickCaptureTarget::DailyNote,
+            quick_capture_custom_note: "Quick Notes".to_owned(),
+            global_quick_capture_enabled: true,
+            global_quick_capture_shortcut: "Ctrl+Shift+C".to_owned(),
+            recent_commands: Vec::new(),
+            recent_note_ids: Vec::new(),
+            sidebar_recent_open: true,
+            search_presets: vec![
+                SearchPreset {
+                    id: Uuid::new_v4(),
+                    name: "To Do Items".to_owned(),
+                    query: "tag:todo".to_owned(),
+                },
+                SearchPreset {
+                    id: Uuid::new_v4(),
+                    name: "Daily Notes".to_owned(),
+                    query: "path:Daily".to_owned(),
+                },
+            ],
+            tag_browser_expanded: true,
+            saved_searches_expanded: true,
             accent_rgb: [129, 140, 248],
             always_on_top: true,
             autostart: false,
@@ -363,12 +402,24 @@ pub fn load_storage() -> StorageResult<LoadedStorage> {
     let _ = fs::create_dir_all(&templates_dir);
     let _ = fs::create_dir_all(&daily_dir);
 
+    // Bootstrap default Daily template if missing
+    let daily_template_path = templates_dir.join("Daily.md");
+    if !daily_template_path.exists() {
+        let default_template_content = "---\ntags:\n  - daily\n---\n# {{date}}\n\n## 🎯 Focus\n- [ ] {{cursor}}\n\n## 📋 Tasks\n- [ ] \n\n## 📝 Notes & Log\n";
+        let _ = atomic_write(&daily_template_path, default_template_content.as_bytes());
+    }
+    if settings.default_daily_template.trim().is_empty() {
+        settings.default_daily_template = "Daily".to_owned();
+    }
+
     // Vault hidden .lilo/cache folder with .gitignore
     let vault_lilo = settings.vault_path.join(".lilo");
     let _ = fs::create_dir_all(vault_lilo.join("cache"));
     let _ = fs::write(vault_lilo.join(".gitignore"), "*\n");
 
-    let (mut notes, warnings, folder_paths) = load_notes(&notes_dir)?;
+    let excluded_directories = managed_note_exclusions(&notes_dir, &settings);
+    let (mut notes, warnings, folder_paths) =
+        load_notes_excluding(&notes_dir, &excluded_directories)?;
 
     settings.legacy_migration_completed = true;
     if !is_safe_relative_path(&settings.selected_folder)
@@ -810,8 +861,12 @@ pub fn restore_from_trash(paths: &StoragePaths, relative: &Path) -> StorageResul
     Ok(destination)
 }
 
-pub fn reload_notes(paths: &StoragePaths) -> StorageResult<(Vec<Note>, Vec<String>, Vec<PathBuf>)> {
-    load_notes(&paths.notes_dir)
+pub fn reload_notes(
+    paths: &StoragePaths,
+    settings: &AppSettings,
+) -> StorageResult<(Vec<Note>, Vec<String>, Vec<PathBuf>)> {
+    let excluded_directories = managed_note_exclusions(&paths.notes_dir, settings);
+    load_notes_excluding(&paths.notes_dir, &excluded_directories)
 }
 
 pub fn vault_snapshot(notes_dir: &Path) -> StorageResult<HashSet<(PathBuf, u128)>> {
@@ -940,8 +995,12 @@ pub fn export_vault(paths: &StoragePaths, destination_root: &Path) -> StorageRes
     Ok(destination)
 }
 
-pub fn vault_diagnostics(paths: &StoragePaths) -> StorageResult<Vec<String>> {
-    let (_, warnings, _) = load_notes(&paths.notes_dir)?;
+pub fn vault_diagnostics(
+    paths: &StoragePaths,
+    settings: &AppSettings,
+) -> StorageResult<Vec<String>> {
+    let excluded_directories = managed_note_exclusions(&paths.notes_dir, settings);
+    let (_, warnings, _) = load_notes_excluding(&paths.notes_dir, &excluded_directories)?;
     let mut diagnostics = warnings;
     for directory in [&paths.notes_dir, &paths.trash_dir, &paths.backups_dir] {
         if !directory.is_dir() {
@@ -1051,7 +1110,34 @@ fn default_vault_path(config_dir: &Path) -> PathBuf {
         .join("LiloVault")
 }
 
+#[cfg(test)]
 fn load_notes(notes_dir: &Path) -> StorageResult<(Vec<Note>, Vec<String>, Vec<PathBuf>)> {
+    load_notes_excluding(notes_dir, &[])
+}
+
+fn managed_note_exclusions(notes_dir: &Path, settings: &AppSettings) -> Vec<PathBuf> {
+    let templates = if settings.templates_folder.as_os_str().is_empty() {
+        Path::new("Templates")
+    } else {
+        &settings.templates_folder
+    };
+    let attachments = if settings.attachments_folder.as_os_str().is_empty() {
+        Path::new("Attachments")
+    } else {
+        &settings.attachments_folder
+    };
+
+    [templates, attachments]
+        .into_iter()
+        .filter(|path| is_safe_relative_path(path))
+        .map(|path| notes_dir.join(path))
+        .collect()
+}
+
+fn load_notes_excluding(
+    notes_dir: &Path,
+    excluded_directories: &[PathBuf],
+) -> StorageResult<(Vec<Note>, Vec<String>, Vec<PathBuf>)> {
     let mut paths = Vec::new();
     let mut folder_paths = vec![PathBuf::new()];
     let mut pending_directories = vec![notes_dir.to_path_buf()];
@@ -1067,6 +1153,9 @@ fn load_notes(notes_dir: &Path) -> StorageResult<(Vec<Note>, Vec<String>, Vec<Pa
                 continue;
             }
             if file_type.is_dir() {
+                if excluded_directories.contains(&path) {
+                    continue;
+                }
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
                 if name_str.starts_with('.') || name_str.eq_ignore_ascii_case("cache") {
@@ -1358,6 +1447,33 @@ mod tests {
         assert!(folders.contains(&PathBuf::from("Programming")));
         assert!(folders.contains(&PathBuf::from("Programming/Rust")));
         assert!(folders.contains(&PathBuf::from("Empty")));
+    }
+
+    #[test]
+    fn templates_and_attachments_are_not_loaded_as_notes() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let notes_dir = temp.path().join("Notes");
+        let templates_dir = notes_dir.join("Templates");
+        let attachments_dir = notes_dir.join("Attachments");
+        fs::create_dir_all(&templates_dir).expect("create templates directory");
+        fs::create_dir_all(&attachments_dir).expect("create attachments directory");
+        fs::write(templates_dir.join("Daily.md"), "# {{date}}")
+            .expect("write template without note metadata");
+        fs::write(attachments_dir.join("Reference.md"), "attachment text")
+            .expect("write markdown attachment");
+        let note = Note::new_named(&notes_dir, "Real note");
+        save_note(&note).expect("save real note");
+
+        let settings = AppSettings::default();
+        let exclusions = managed_note_exclusions(&notes_dir, &settings);
+        let (notes, warnings, folders) =
+            load_notes_excluding(&notes_dir, &exclusions).expect("load note documents");
+
+        assert!(warnings.is_empty());
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].title, "Real note");
+        assert!(!folders.contains(&PathBuf::from("Templates")));
+        assert!(!folders.contains(&PathBuf::from("Attachments")));
     }
 
     #[test]
@@ -1675,5 +1791,36 @@ mod tests {
         assert_eq!(warnings.len(), 1);
         assert!(folders.len() >= 24);
         assert!(elapsed < std::time::Duration::from_secs(10));
+    }
+
+    #[test]
+    fn quick_capture_target_serialization_and_defaults() {
+        let targets = vec![
+            QuickCaptureTarget::DailyNote,
+            QuickCaptureTarget::Inbox,
+            QuickCaptureTarget::NewNote,
+            QuickCaptureTarget::CustomNote("Meeting Notes".to_owned()),
+        ];
+
+        for target in targets {
+            let json = serde_json::to_string(&target).expect("serialize target");
+            let parsed: QuickCaptureTarget =
+                serde_json::from_str(&json).expect("deserialize target");
+            assert_eq!(parsed, target);
+        }
+
+        // Check deserializing empty settings retains default daily template and global shortcut
+        let parsed_settings: AppSettings =
+            serde_json::from_str("{}").expect("parse default settings");
+        assert_eq!(parsed_settings.default_daily_template, "Daily");
+        assert_eq!(
+            parsed_settings.global_quick_capture_shortcut,
+            "Ctrl+Shift+C"
+        );
+        assert!(parsed_settings.global_quick_capture_enabled);
+        assert_eq!(
+            parsed_settings.quick_capture_target,
+            QuickCaptureTarget::DailyNote
+        );
     }
 }

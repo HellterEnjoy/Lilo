@@ -1,9 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod attachments;
 mod commands;
 mod daily;
 mod folders;
+mod global_hotkey;
 mod graph;
 mod links;
 mod markdown;
@@ -11,6 +13,7 @@ mod platform;
 mod quick_capture;
 mod search;
 mod storage;
+mod tags;
 mod templates;
 mod ui_style;
 
@@ -40,6 +43,9 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Lilo",
         native_options,
-        Box::new(|_creation_context| Ok(Box::new(app::WidgetApp::new()))),
+        Box::new(|creation_context| {
+            egui_extras::install_image_loaders(&creation_context.egui_ctx);
+            Ok(Box::new(app::WidgetApp::new()))
+        }),
     )
 }

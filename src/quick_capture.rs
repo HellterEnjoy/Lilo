@@ -1,5 +1,4 @@
-//! Quick Capture modal and buffer synchronization helpers.
-
+use crate::storage::QuickCaptureTarget;
 use chrono::{DateTime, Local};
 use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Key, Pos2, Stroke, Vec2};
 
@@ -8,6 +7,8 @@ pub struct QuickCaptureState {
     pub is_open: bool,
     pub text: String,
     pub focus_input: bool,
+    pub selected_target: Option<QuickCaptureTarget>,
+    pub custom_note_name: String,
 }
 
 impl QuickCaptureState {
@@ -20,12 +21,14 @@ impl QuickCaptureState {
     pub fn close(&mut self) {
         self.is_open = false;
         self.text.clear();
+        self.selected_target = None;
     }
 }
 
 pub struct QuickCaptureSubmission {
     pub text: String,
     pub timestamp: DateTime<Local>,
+    pub target: QuickCaptureTarget,
 }
 
 /// Formats a quick capture entry with timestamp and bullet.
@@ -43,14 +46,22 @@ pub fn format_capture_entry(text: &str, timestamp: DateTime<Local>) -> String {
     }
 }
 
-/// Renders the Quick Capture popup modal.
+/// Renders the Quick Capture popup modal with interactive target switching.
 pub fn show_quick_capture(
     ctx: &egui::Context,
     state: &mut QuickCaptureState,
-    target_label: &str,
+    default_target: &QuickCaptureTarget,
+    default_custom_note: &str,
 ) -> Option<QuickCaptureSubmission> {
     if !state.is_open {
         return None;
+    }
+
+    if state.selected_target.is_none() {
+        state.selected_target = Some(default_target.clone());
+    }
+    if state.custom_note_name.is_empty() && !default_custom_note.is_empty() {
+        state.custom_note_name = default_custom_note.to_owned();
     }
 
     let mut submission = None;
@@ -75,8 +86,8 @@ pub fn show_quick_capture(
     ));
     painter.rect_filled(screen_rect, 0.0, Color32::from_black_alpha(140));
 
-    let modal_width = 540.0_f32.min(screen_rect.width() - 32.0);
-    let modal_pos = Pos2::new(screen_rect.center().x, screen_rect.top() + 90.0);
+    let modal_width = 560.0_f32.min(screen_rect.width() - 32.0);
+    let modal_pos = Pos2::new(screen_rect.center().x, screen_rect.top() + 80.0);
 
     egui::Area::new(egui::Id::new("quick_capture_area"))
         .order(egui::Order::Foreground)
@@ -101,15 +112,64 @@ pub fn show_quick_capture(
                     ui.set_width(modal_width);
 
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("Quick Capture").strong().size(16.0));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(
-                                egui::RichText::new(format!("Target: {target_label}"))
-                                    .small()
-                                    .color(ui.visuals().hyperlink_color),
-                            );
-                        });
+                        ui.label(egui::RichText::new("⚡ Quick Capture").strong().size(16.0));
                     });
+
+                    ui.add_space(6.0);
+
+                    // Target Switcher Pills
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            egui::RichText::new("Target:")
+                                .small()
+                                .color(ui.visuals().weak_text_color()),
+                        );
+
+                        let is_daily =
+                            matches!(state.selected_target, Some(QuickCaptureTarget::DailyNote));
+                        if ui.selectable_label(is_daily, "📅 Daily Note").clicked() {
+                            state.selected_target = Some(QuickCaptureTarget::DailyNote);
+                        }
+
+                        let is_inbox =
+                            matches!(state.selected_target, Some(QuickCaptureTarget::Inbox));
+                        if ui.selectable_label(is_inbox, "📥 Inbox").clicked() {
+                            state.selected_target = Some(QuickCaptureTarget::Inbox);
+                        }
+
+                        let is_new =
+                            matches!(state.selected_target, Some(QuickCaptureTarget::NewNote));
+                        if ui.selectable_label(is_new, "📝 New Note").clicked() {
+                            state.selected_target = Some(QuickCaptureTarget::NewNote);
+                        }
+
+                        let is_custom = matches!(
+                            state.selected_target,
+                            Some(QuickCaptureTarget::CustomNote(_))
+                        );
+                        if ui.selectable_label(is_custom, "📌 Specific Note").clicked() {
+                            state.selected_target = Some(QuickCaptureTarget::CustomNote(
+                                state.custom_note_name.clone(),
+                            ));
+                        }
+                    });
+
+                    if let Some(QuickCaptureTarget::CustomNote(_)) = &state.selected_target {
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("Note name:").small());
+                            let resp = ui.add(
+                                egui::TextEdit::singleline(&mut state.custom_note_name)
+                                    .desired_width(180.0)
+                                    .hint_text("Target note title..."),
+                            );
+                            if resp.changed() {
+                                state.selected_target = Some(QuickCaptureTarget::CustomNote(
+                                    state.custom_note_name.clone(),
+                                ));
+                            }
+                        });
+                    }
 
                     ui.add_space(8.0);
 
@@ -152,9 +212,14 @@ pub fn show_quick_capture(
                                 .clicked()
                                 || (can_submit && submit_shortcut)
                             {
+                                let target = state
+                                    .selected_target
+                                    .clone()
+                                    .unwrap_or_else(|| default_target.clone());
                                 submission = Some(QuickCaptureSubmission {
                                     text: state.text.trim().to_string(),
                                     timestamp: Local::now(),
+                                    target,
                                 });
                                 state.close();
                             }

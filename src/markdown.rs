@@ -227,6 +227,41 @@ pub fn continue_list_at_cursor(ctx: &Context, id: Id, text: &mut String) -> bool
     true
 }
 
+/// Inserts an attachment markdown link at the current cursor position (or at end of text if unselected).
+pub fn insert_attachment_link(
+    ctx: &Context,
+    id: Id,
+    text: &mut String,
+    filename: &str,
+    rel_path: &str,
+    is_img: bool,
+) {
+    let mut state = TextEditState::load(ctx, id).unwrap_or_default();
+    let char_count = text.chars().count();
+    let char_index = state
+        .cursor
+        .char_range()
+        .map(|r| usize::from(r.primary.index))
+        .unwrap_or(char_count)
+        .min(char_count);
+
+    let tag = if is_img {
+        format!("\n![{filename}]({rel_path})\n")
+    } else {
+        format!("\n[{filename}]({rel_path})\n")
+    };
+
+    let byte_index = char_to_byte(text, char_index);
+    text.insert_str(byte_index, &tag);
+
+    let new_cursor = char_index + tag.chars().count();
+    state
+        .cursor
+        .set_char_range(Some(CCursorRange::one(CCursor::new(new_cursor))));
+    state.store(ctx, id);
+    ctx.memory_mut(|memory| memory.request_focus(id));
+}
+
 #[derive(Clone, Copy)]
 enum LineEdit {
     Toggle(&'static str),

@@ -24,7 +24,7 @@ It stays compact when you need a quick thought and expands into a complete writi
 
 </div>
 
-> **Daily Workflow Preview · v0.1.9** — Daily Notes, Quick Capture, Markdown templates and the Command Palette join Lilo's existing editor, knowledge graph and recovery workflow. Notes and templates remain ordinary local Markdown files.
+> **Knowledge Workflow · v0.2.0** — Daily capture, hierarchical tags, local attachments and link-safe navigation now form one stable workflow. Notes, templates and metadata remain ordinary local files.
 
 ## One app, two scales
 
@@ -56,12 +56,14 @@ Lilo is designed around a simple idea: opening a note should not force you into 
 | --- | --- | --- |
 | ✍️ | **Live Markdown** | A single editor instead of separate edit and preview modes, with headings, lists, tasks, links, inline code, fenced code blocks and selection formatting. |
 | 📅 | **Daily notes** | Open or create today, move to yesterday or tomorrow, choose the daily folder and use date-based filenames including nested date paths. |
-| ⚡ | **Quick Capture** | Record an idea from anywhere and append it to today's daily note, `Inbox.md`, or a new timestamped note. |
+| ⚡ | **Quick Capture** | Record an idea in today's Daily Note, `Inbox.md`, a new timestamped note or a selected custom note. Windows can open capture with a system-wide hotkey. |
 | 🧩 | **Templates** | Create notes from regular `.md` templates or insert a template into the current note. No scripts and no proprietary template database. |
 | ⌘ | **Command Palette** | Fuzzy-search application commands and run the complete daily, navigation, note, layout and vault workflow from the keyboard. |
-| 🔗 | **Connected notes** | Obsidian-style `[[wiki links]]`, aliases, outgoing links, backlinks and clear unresolved-link handling. |
+| 🔗 | **Connected notes** | Obsidian-style `[[wiki links]]`, aliases, backlinks, unresolved-link inspection, link-preserving note renames and back/forward history. |
 | ◉ | **Knowledge graph** | Local, folder and global scopes with filtering, zooming, panning, movable nodes, stable placement and a compact temporary overlay. |
-| 🗂️ | **Vault organisation** | Nested folders, pinning, sorting, tags, aliases and focused search operators for a growing collection. |
+| 🏷️ | **Tags and search** | Hierarchical inline or frontmatter tags, usage counts, clickable filters, saved searches and focused positive or negative search operators. |
+| 📎 | **Local attachments** | Paste or drag local images, keep relative Markdown links and inspect unreferenced files without introducing a proprietary media database. |
+| 🗂️ | **Vault organisation** | Nested folders, pinning, sorting, aliases and recent-note navigation for a growing collection. |
 | 🛟 | **Data safety** | Automatic saving, rotating backups, recoverable Trash, external-edit conflict review, diagnostics, import and full-vault export. |
 | 🖥️ | **Adaptive workspace** | Compact and expanded layouts, explorer and inspector sidebars, Zen mode, movable toolbar, themes, typography and always-on-top mode. |
 
@@ -85,7 +87,10 @@ Quick Capture adds a timestamped entry without making you switch away from the n
 
 - today's daily note;
 - `Inbox.md`;
-- a new timestamped note.
+- a new timestamped note;
+- a selected custom note.
+
+On Windows, the configurable global shortcut can bring Lilo forward and open Quick Capture even when another application is focused. Linux keeps the in-app shortcut; a system-wide Linux implementation is not included in `0.2.0`.
 
 ## Templates without lock-in
 
@@ -135,6 +140,18 @@ tag:rust path:"Programming Notes" link:"Ownership" title:"Memory" borrowing
 
 All conditions in a query are applied together, so a broad vault can be narrowed quickly.
 
+Tag filters accept comma-separated values and negation, for example:
+
+```text
+tag:rust,learning -tag:archived
+```
+
+## Attachments without a media database
+
+Drop an image into the editor or paste a screenshot to copy it into the configurable `Attachments` folder. Lilo inserts a relative Markdown image link and renders PNG, JPEG, GIF, WebP and SVG files inline. Other files can remain ordinary relative Markdown links.
+
+Imported files never silently replace an existing file with the same name. The orphan inspector lists files that are no longer referenced before the user chooses whether to remove them. Attachment paths are constrained to a relative directory inside `Notes` so a cleanup cannot scan outside the vault.
+
 ## Markdown-first storage
 
 Lilo stores content as `.md` files with YAML frontmatter. Preferences and interface state stay separately in `settings.json`.
@@ -144,6 +161,7 @@ Vault/
 ├── Notes/
 │   ├── Daily/          Daily notes
 │   ├── Templates/      Reusable Markdown templates
+│   ├── Attachments/    Images and linked local files
 │   └── ...             Your own folders and notes
 ├── Trash/              Recoverable deleted notes
 └── Backups/            Rotating note backups
@@ -156,7 +174,8 @@ There is no embedded note database and no proprietary content format. Notes can 
 | Action | Default shortcut |
 | --- | --- |
 | Command Palette | `Ctrl+P` or `Ctrl+K` |
-| Quick Capture | `Ctrl+Shift+C` |
+| Quick Capture | `Ctrl+Shift+C` in-app and system-wide on Windows |
+| Back / forward | `Alt+Left` / `Alt+Right` |
 | Open today's note | `Alt+D` |
 | Create a blank note | `Ctrl+N` |
 | Save immediately | `Ctrl+S` |
@@ -176,20 +195,20 @@ Download the latest packages and matching SHA-256 files from [GitHub Releases](h
 
 ### Windows
 
-- `Lilo-0.1.9-windows-x64-setup.exe` — per-user installer with a Start menu shortcut; administrator access is not required.
-- `Lilo-0.1.9-windows-x64.zip` — portable archive for manual installation.
+- `Lilo-0.2.0-windows-x64-setup.exe` — per-user installer with a Start menu shortcut; administrator access is not required.
+- `Lilo-0.2.0-windows-x64.zip` — portable archive for manual installation.
 
 The current binaries are not code-signed, so Windows SmartScreen may display a warning. WinGet distribution is prepared but remains unavailable until the initial package is accepted into the community repository.
 
 ### Linux
 
-- `Lilo-0.1.9-ubuntu-22.04-x86_64.tar.gz` — Ubuntu 22.04 or newer.
-- `Lilo-0.1.9-arch-x86_64.tar.gz` — current Arch Linux.
+- `Lilo-0.2.0-ubuntu-22.04-x86_64.tar.gz` — Ubuntu 22.04 or newer.
+- `Lilo-0.2.0-arch-x86_64.tar.gz` — current Arch Linux.
 
 ```bash
-sha256sum -c Lilo-0.1.9-<platform>-x86_64.tar.gz.sha256
-tar -xzf Lilo-0.1.9-<platform>-x86_64.tar.gz
-cd Lilo-0.1.9-<platform>-x86_64
+sha256sum -c Lilo-0.2.0-<platform>-x86_64.tar.gz.sha256
+tar -xzf Lilo-0.2.0-<platform>-x86_64.tar.gz
+cd Lilo-0.2.0-<platform>-x86_64
 install -Dm755 Lilo "$HOME/.local/bin/Lilo"
 "$HOME/.local/bin/Lilo"
 ```
@@ -240,7 +259,7 @@ Windows and Ubuntu run formatting, tests and Clippy in CI. Linux releases are cu
 
 ## Project status
 
-The `v0.1.9` Daily Workflow Preview is the final feature-preview step before `v0.2.0` stabilises the complete everyday workflow. Lilo does not yet provide automatic updates, code signing, native Linux packages or an official macOS build. Graph density and expensive live highlighting are intentionally bounded to keep the widget responsive.
+Version `v0.2.0` stabilises Lilo's daily and knowledge workflow: capture, templates, hierarchical tags, attachments, structured search and safer connected-note navigation. Lilo does not yet provide automatic updates, code signing, native Linux packages, a system-wide Linux capture hotkey or an official macOS build. Graph density and expensive live highlighting remain intentionally bounded to keep the widget responsive.
 
 - [Roadmap](ROADMAP.md) — planned product direction;
 - [Changelog](CHANGELOG.md) — implemented release history;

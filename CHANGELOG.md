@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.0 — Knowledge Workflow
+
+> [!WARNING]
+> Lilo is still under active development. Although this release passed automated checks on Windows, Arch Linux and Ubuntu 22.04, bugs may remain and some functionality may behave differently or fail on particular systems, desktop environments or vaults. Keep a current vault backup and report reproducible problems through GitHub Issues.
+
+- stabilised Daily Notes, templates, Quick Capture and the Command Palette introduced in `0.1.9`;
+- added Quick Capture destinations for a selected custom note and improved target switching;
+- added an optional system-wide Quick Capture shortcut on Windows while retaining the in-app shortcut on Linux;
+- added hierarchical tag indexing, usage counts, tag filtering and vault-wide tag renaming;
+- expanded structured search with comma-separated and negated tag filters plus reusable saved searches;
+- added image paste, drag-and-drop file import, relative attachment links and inline local image rendering;
+- added attachment collision protection, vault-contained attachment paths and an orphan-file inspector;
+- added back and forward note navigation, improved heading and link inspection, and vault-wide unresolved-link discovery;
+- preserved headings, aliases and folder prefixes when updating wiki links after a note rename;
+- improved Daily Note date parsing and relative-day navigation for flat and nested date paths;
+- ensured vault-wide tag and link changes persist every affected note through the existing backup-aware save path;
+- reduced image-loader dependencies by excluding unused HTTP loading;
+- expanded automated coverage to 89 passing Windows tests and 90 passing Linux tests while keeping the Markdown vault and JSON settings backwards-compatible.
+
 ## 0.1.9 — Daily Workflow Preview
 
 - added local-date Daily Notes with configurable folders, filename formats and previous/next-day navigation;

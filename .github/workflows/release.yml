@@ -80,7 +80,11 @@ jobs:
             gh release upload $tag @assets --clobber
           }
           else {
-            gh release create $tag @assets --title "Lilo $version" --generate-notes --verify-tag
+            $releaseNotice = @"
+          > [!WARNING]
+          > Lilo is still under active development. Although this release passed automated checks, bugs may remain and some functionality may behave differently or fail on particular systems, desktop environments or vaults. Keep a current vault backup and report reproducible problems through GitHub Issues.
+          "@
+            gh release create $tag @assets --title "Lilo $version" --generate-notes --notes $releaseNotice --verify-tag
           }
           if ($LASTEXITCODE -ne 0) {
             throw 'GitHub release publishing failed.'

@@ -130,115 +130,104 @@ Further `0.1.x` releases are reserved for blocking data-safety, packaging or com
 - add native application branding and current interface screenshots;
 - retain backwards-compatible Markdown notes and automatic JSON settings migration.
 
-## 0.2.0 — Daily workflow
+## 0.2.0 — Knowledge workflow ✅
 
-**Status:** next stabilisation milestone.
+**User value:** capture, organisation and navigation now form one coherent everyday workflow without abandoning portable Markdown.
 
-**User value:** Lilo becomes useful as something opened every day, not only as a place to store isolated notes.
+- stabilise Daily Notes, declarative templates, Quick Capture and the Command Palette;
+- add a configurable custom-note capture destination and a system-wide Windows capture shortcut;
+- add hierarchical tags, usage counts, clickable filters and reusable searches;
+- support comma-separated and negated tag search filters;
+- paste or drag local images and files into a vault-contained attachments folder;
+- render common local image formats while keeping relative Markdown links;
+- detect orphaned attachments without automatic deletion or silent overwriting;
+- add back and forward navigation and vault-wide unresolved-link inspection;
+- preserve wiki-link headings, aliases and folder prefixes when a note is renamed;
+- save every note affected by a vault-wide rename through the backup-aware storage path;
+- keep settings migration automatic and note files compatible with `0.1.x`.
 
-- stabilise the Daily Notes, templates, Quick Capture and Command Palette introduced in `0.1.9`;
-- complete keyboard-focus and compact-layout testing for every new creation flow;
-- verify date boundaries, invalid formats and settings migration on Windows and Linux;
-- refine errors and recovery behaviour for missing templates or externally changed target notes;
-- remove duplicate shortcuts and route remaining user actions consistently through the command registry;
-- profile startup, command matching and capture writes against realistically large vaults;
-- complete the accessibility, documentation and packaging pass required for a stable feature milestone.
+Templates remain declarative and attachments remain ordinary files. Neither system can execute scripts or introduce hidden note data.
 
-Templates remain declarative. They cannot execute scripts or hide required data outside the generated Markdown file.
+**Platform acceptance:** the complete note, tag, search, attachment and navigation model is shared by Windows and Linux. The system-wide capture shortcut is explicitly Windows-only in this release; the ordinary in-app shortcut works on both supported platforms.
 
-**Platform acceptance:** date and timezone behaviour is tested on Windows and Linux; daily and template folders use relative `PathBuf` values; no template or shortcut stores an operating-system-specific absolute path in note metadata.
+## 0.2.1 — Vault safety and migration
 
-**Ready when:** the same local calendar day always resolves to the same note, templates produce portable Markdown, and all creation flows work without using the mouse.
+**Status:** planned from real `0.2.0` feedback.
 
-## 0.2.1 — Find and organise
+**User value:** bulk changes and upgrades remain predictable even when files are unusual, externally edited or partially inaccessible.
 
-**Status:** planned.
+- add a reviewed preview before a vault-wide tag or link rewrite;
+- make partial write failures visible without hiding which files were saved;
+- extend recovery diagnostics to missing and malformed attachment links;
+- test upgrades from representative `0.1.x` vaults and settings files;
+- test interrupted bulk operations and read-only files;
+- clarify which recovery actions use Backups and which use Trash.
 
-**User value:** a growing vault remains easy to search and reorganise.
+**Ready when:** every multi-file operation explains its scope, preserves recoverable input and reports partial failure accurately.
 
-- add a tag browser with usage counts and nested tag names such as `rust/ownership`;
-- filter the note list by one or more tags;
-- add focused search operators such as `tag:`, `path:` and `link:` while preserving simple text search;
-- make tags clickable in note properties, search results and graph details;
-- provide recent searches or saved filters only if they remain understandable in the compact UI;
-- preview tag rename or removal across the vault before writing changes;
-- create backups for every affected note during a bulk metadata operation.
+## 0.2.2 — Large-vault performance
 
-**Ready when:** a user can locate and safely reorganise related notes without opening files one by one or editing frontmatter manually.
+**Status:** planned; implementation depends on measured bottlenecks.
 
-## 0.2.2 — Attachments and Markdown interoperability
+**User value:** Lilo remains responsive when a personal vault grows from dozens to thousands of notes.
 
-**Status:** planned.
+- benchmark startup, search, tag indexing and link indexing with 1,000 and 10,000 notes;
+- avoid rebuilding vault-wide indexes when one note changes if profiling shows meaningful cost;
+- bound decoded-image memory and release unused image resources;
+- profile graph layout and interaction on dense vaults;
+- keep editor highlighting and command matching responsive for unusually large notes;
+- document repeatable performance fixtures and acceptable limits.
 
-**User value:** screenshots, diagrams and reference files can live with notes without sacrificing the plain-file vault.
+**Ready when:** published performance measurements identify the remaining limits and ordinary editing does not stall behind avoidable vault-wide work.
 
-- paste or drag an image into a note and store it in a predictable attachments directory;
-- attach an existing file using a relative Markdown link;
-- open or reveal an attachment through the operating system;
-- include attachments in vault export and recovery diagnostics;
-- detect missing and clearly orphaned attachments without deleting them automatically;
-- document paths and naming rules so notes remain usable in other Markdown applications.
+## 0.2.3 — Platform integration and distribution
 
-Lilo will not embed binary data in Markdown, become a media library, or introduce a proprietary attachment database.
+**Status:** planned; features may differ where Windows, X11 and Wayland provide different capabilities.
 
-**Platform acceptance:** paste, drag-and-drop and reveal-in-folder behaviour may use different native integrations, but stored Markdown links remain relative and portable between Windows and Linux.
+**User value:** supported packages behave like native desktop applications and are easier to install and update safely.
 
-**Ready when:** an exported vault preserves working relative links and no attachment operation can silently overwrite or delete an existing user file.
+- harden Windows global-hotkey registration, conflict reporting and shutdown cleanup;
+- investigate a maintainable Linux capture shortcut without claiming unsupported Wayland behaviour;
+- preserve native Windows and XDG autostart implementations;
+- improve Ubuntu and Arch packaging based on actual download and support demand;
+- complete the initial WinGet submission when the package is accepted;
+- evaluate update notification separately from automatic self-updating;
+- continue publishing checksums and explicit platform support boundaries.
 
-## 0.2.3 — Knowledge navigation
+**Ready when:** installation, shortcuts, startup and removal are predictable on every advertised platform, and unsupported integration is clearly identified in the UI.
 
-**Status:** planned.
+## 0.2.4 — Workflow polish
 
-**User value:** moving through a connected vault becomes faster and safer than manually following filenames.
+**Status:** planned after reliability and performance work.
 
-- add back and forward navigation history;
-- add a compact heading outline for the current note;
-- make note renaming preserve link integrity through reviewed link updates or retained aliases;
-- improve unresolved-link and duplicate-title resolution;
-- add useful graph grouping or colouring by folder and tag;
-- allow a small number of saved graph filters or views;
-- keep graph interaction responsive with vaults containing thousands of notes.
+**User value:** the existing feature set becomes easier to discover and operate without making the compact window crowded.
 
-This release improves navigation, not graph decoration. Visual effects without navigational value are out of scope.
+- complete a keyboard-focus and screen-reader pass for dialogs and overlays;
+- improve first-run and empty-vault guidance;
+- make destructive confirmations and status messages consistent;
+- reduce duplicated controls by routing actions through the command registry;
+- improve compact layouts at minimum supported sizes;
+- refine Explorer and Inspector information hierarchy from user feedback.
 
-**Ready when:** renaming and traversing notes does not unexpectedly break connections, and the graph helps answer where a note belongs or what connects to it.
+Arbitrary CSS-like skinning and per-screen theme overrides remain out of scope.
 
-## 0.2.4 — Personalisation and platform distribution
+**Ready when:** a new user can discover capture, search, recovery and navigation without consulting source code or fighting keyboard focus.
 
-**Status:** planned; builds on the cross-platform baseline established before `0.2.0`.
+## 0.2.5 — Feedback-driven consolidation
 
-**User value:** Lilo can follow the user between machines and adapt to their environment without changing note data.
+**Status:** intentionally not feature-filled in advance.
 
-- provide a small maintained set of accessible light and dark themes;
-- retain system-theme following, accent colour, interface density and editor typography controls;
-- add an explicit portable mode with settings and a default vault beside the executable;
-- clearly separate installed and portable storage so the two modes cannot be confused silently;
-- show the active mode and all resolved storage paths in diagnostics;
-- maintain tested Linux archives and evaluate native distribution packages only where they improve installation and updates;
-- keep macOS source-compatible and document its status without promising signing or notarisation;
-- publish separate installed-mode and portable Windows packages with checksums.
+**User value:** the last planned `0.2.x` milestone addresses demonstrated problems instead of adding speculative surface area.
 
-Arbitrary CSS-like skinning and per-screen theme overrides are out of scope.
+- prioritise reproducible bugs and repeated workflow requests from Issues and Discussions;
+- simplify or remove interactions that users consistently misunderstand;
+- finish accessibility, documentation and packaging gaps found in `0.2.x`;
+- decide the `0.3.x` direction from actual usage: capture speed, knowledge navigation or portable-vault workflow;
+- publish explicit non-goals before beginning another large feature cycle.
 
-**Ready when:** a portable package can be moved between user-writable folders and reopen its vault without touching installed settings, while every supported theme and platform passes the compact-layout smoke test.
+Plugins, arbitrary scripts and an extension marketplace are not promised for `0.2.x`.
 
-## 0.2.5 — Safe automation experiment
-
-**Status:** exploratory; inclusion depends on a real workflow validated in earlier releases.
-
-**User value:** repetitive personal workflows can be extended without giving unknown code unrestricted access to the vault or computer.
-
-- route built-in actions and shortcuts through an internal command registry;
-- define a versioned, declarative extension manifest;
-- allow experimental commands composed from safe built-in actions and templates;
-- expose no unrestricted process, filesystem or network execution;
-- isolate malformed or incompatible extensions and report them through diagnostics;
-- provide a global safe mode that starts Lilo with extensions disabled;
-- document the format as experimental and unstable before `1.0`.
-
-Native dynamic libraries, arbitrary scripts, an online marketplace and third-party API stability guarantees are not planned for `0.2.x`.
-
-**Ready when:** a broken extension cannot block access to the vault, disabling the experiment leaves every note untouched, and the feature is useful for at least one real workflow rather than existing only as an API demonstration.
+**Ready when:** the project has a documented, evidence-based direction for `0.3.x` and no known blocking data-safety regression remains in the `0.2.x` line.
 
 ## Beyond 0.2.5
 

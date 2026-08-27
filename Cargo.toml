@@ -1,6 +1,6 @@
 [package]
 name = "Lilo"
-version = "0.1.9"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
@@ -12,6 +12,9 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde-saphyr = "1.0.1"
 uuid = { version = "1.24", features = ["v4", "serde"] }
+arboard = "3.4"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+egui_extras = { version = "0.36.1", default-features = false, features = ["image", "svg", "gif", "webp"] }
 
 [dev-dependencies]
 tempfile = "3.27"

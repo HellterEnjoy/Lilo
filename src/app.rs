@@ -1,6 +1,7 @@
-use crate::commands::{self, CommandAction, CommandPaletteState};
+use crate::commands::{self, CommandAction, CommandPaletteResult, CommandPaletteState};
 use crate::daily::LocalDateService;
 use crate::folders;
+use crate::global_hotkey::{GlobalHotkeyEvent, GlobalHotkeyManager};
 use crate::graph;
 use crate::links::{self, LinkIndex, LinkResolution};
 use crate::markdown;
@@ -8,11 +9,13 @@ use crate::platform;
 use crate::quick_capture::{self, QuickCaptureState, QuickCaptureSubmission};
 use crate::search::SearchQuery;
 use crate::storage::{
-    self, AppData, AppSettings, Note, NoteSort, QuickCaptureTarget, StoragePaths, ThemeChoice,
-    ToolbarPlacement,
+    self, AppData, AppSettings, Note, NoteSort, QuickCaptureTarget, SearchPreset, StoragePaths,
+    ThemeChoice, ToolbarPlacement,
 };
+use crate::tags::{self, TagIndex};
 use crate::templates::TemplateEngine;
 use crate::ui_style::{self, Icon};
+use chrono::TimeZone;
 use eframe::egui;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -32,6 +35,7 @@ pub(crate) struct WidgetApp {
     last_edit_at: Option<Instant>,
     storage_message: Option<String>,
     link_index: LinkIndex,
+    tag_index: TagIndex,
     folder_paths: Vec<PathBuf>,
     graph_state: graph::GraphState,
 
@@ -60,7 +64,25 @@ pub(crate) struct WidgetApp {
     new_alias: String,
     note_details_open: bool,
 
-    // 0.1.1 & Daily Workflow Foundation
+    // Tags and saved search state.
+    tag_rename_dialog_open: bool,
+    tag_to_rename: String,
+    tag_new_name_buffer: String,
+    show_new_preset_input: bool,
+    new_preset_name_buffer: String,
+
+    // Attachment inspection state.
+    attachments_orphans: Vec<PathBuf>,
+    attachments_inspected: bool,
+
+    // Note navigation state.
+    history_back: Vec<Uuid>,
+    history_forward: Vec<Uuid>,
+    is_navigating_history: bool,
+    note_titles_snapshot: HashMap<Uuid, String>,
+
+    // Daily workflow and global capture state.
+    hotkey_manager: GlobalHotkeyManager,
     command_palette_state: CommandPaletteState,
     quick_capture_state: QuickCaptureState,
     template_selector_open: bool,
@@ -355,6 +377,13 @@ impl WidgetApp {
     pub(crate) fn new() -> Self {
         let loaded = storage::load_storage().expect("Failed to initialize Markdown storage");
         let link_index = LinkIndex::build(&loaded.data.notes, &loaded.paths.notes_dir);
+        let tag_index = TagIndex::build(&loaded.data.notes);
+        let note_titles_snapshot: HashMap<Uuid, String> = loaded
+            .data
+            .notes
+            .iter()
+            .map(|n| (n.id, n.title.clone()))
+            .collect();
 
         for warning in &loaded.warnings {
             eprintln!("Storage warning: {warning}");
@@ -368,6 +397,11 @@ impl WidgetApp {
         if operating_system.supports_autostart() {
             let _ = platform::set_autostart(loaded.settings.autostart);
         }
+        let hotkey_manager = GlobalHotkeyManager::new(
+            loaded.settings.global_quick_capture_enabled,
+            &loaded.settings.global_quick_capture_shortcut,
+        );
+
         Self {
             data: loaded.data,
             settings: loaded.settings,
@@ -378,6 +412,7 @@ impl WidgetApp {
             last_edit_at: None,
             storage_message: None,
             link_index,
+            tag_index,
             folder_paths: loaded.folder_paths,
             graph_state,
             view: AppView::Editor,
@@ -405,6 +440,21 @@ impl WidgetApp {
             new_alias: String::new(),
             note_details_open: false,
 
+            tag_rename_dialog_open: false,
+            tag_to_rename: String::new(),
+            tag_new_name_buffer: String::new(),
+            show_new_preset_input: false,
+            new_preset_name_buffer: String::new(),
+
+            attachments_orphans: Vec::new(),
+            attachments_inspected: false,
+
+            history_back: Vec::new(),
+            history_forward: Vec::new(),
+            is_navigating_history: false,
+            note_titles_snapshot,
+
+            hotkey_manager,
             command_palette_state: CommandPaletteState::default(),
             quick_capture_state: QuickCaptureState::default(),
             template_selector_open: false,
@@ -668,8 +718,21 @@ impl WidgetApp {
     }
 
     // Daily Notes Management
+    pub fn current_daily_note_date(&self) -> Option<chrono::NaiveDate> {
+        let note = self.data.selected_note()?;
+        let rel = note
+            .file_path
+            .strip_prefix(&self.storage_paths.notes_dir)
+            .unwrap_or(&note.file_path);
+        LocalDateService::parse_date_from_note(&note.title, rel)
+    }
+
     pub fn open_or_create_daily_note(&mut self, offset_days: i64) {
         let target_date = LocalDateService::today() + chrono::Duration::days(offset_days);
+        self.open_or_create_daily_note_for_date(target_date);
+    }
+
+    pub fn open_or_create_daily_note_for_date(&mut self, target_date: chrono::NaiveDate) {
         let (subfolder, note_title) = match LocalDateService::format_daily_path(
             &self.settings.daily_note_format,
             target_date,
@@ -724,8 +787,22 @@ impl WidgetApp {
             String::new()
         };
 
-        let (expanded_content, cursor_pos) =
-            TemplateEngine::expand(&template_text, &note_title, LocalDateService::now());
+        let now_with_target_date = target_date
+            .and_hms_opt(12, 0, 0)
+            .and_then(|naive| chrono::Local.from_local_datetime(&naive).single())
+            .unwrap_or_else(LocalDateService::now);
+
+        let (expanded_content, cursor_pos) = if !template_text.is_empty() {
+            TemplateEngine::expand(&template_text, &note_title, now_with_target_date)
+        } else {
+            (
+                format!(
+                    "---\ntags:\n  - daily\n---\n# {}\n\n## 🎯 Focus\n- [ ] \n\n## 📋 Tasks\n- [ ] \n\n## 📝 Notes & Log\n",
+                    note_title
+                ),
+                None,
+            )
+        };
 
         let id = self.data.create_note_named(&target_folder_abs, &note_title);
         if let Some(note) = self.data.notes.iter_mut().find(|n| n.id == id) {
@@ -824,7 +901,7 @@ impl WidgetApp {
     pub fn apply_quick_capture(&mut self, submission: QuickCaptureSubmission) {
         let entry = quick_capture::format_capture_entry(&submission.text, submission.timestamp);
 
-        match self.settings.quick_capture_target {
+        let captured_note_id = match submission.target {
             QuickCaptureTarget::DailyNote => {
                 let target_date = LocalDateService::today();
                 let (subfolder, note_title) = match LocalDateService::format_daily_path(
@@ -872,6 +949,7 @@ impl WidgetApp {
 
                 self.save_note_now(note_id);
                 self.storage_message = Some(format!("Captured to daily note ({target_title})"));
+                note_id
             }
             QuickCaptureTarget::Inbox => {
                 let inbox_title = "Inbox";
@@ -905,6 +983,7 @@ impl WidgetApp {
 
                 self.save_note_now(note_id);
                 self.storage_message = Some("Captured to Inbox".to_owned());
+                note_id
             }
             QuickCaptureTarget::NewNote => {
                 let note_directory = storage::ensure_note_folder(
@@ -922,8 +1001,59 @@ impl WidgetApp {
                 self.save_note_now(id);
                 self.link_index = LinkIndex::build(&self.data.notes, &self.storage_paths.notes_dir);
                 self.storage_message = Some(format!("Created capture note '{title}'"));
+                id
             }
-        }
+            QuickCaptureTarget::CustomNote(target_title) => {
+                let clean_title = if target_title.trim().is_empty() {
+                    "Quick Notes"
+                } else {
+                    target_title.trim()
+                };
+
+                let existing_id = self
+                    .data
+                    .notes
+                    .iter()
+                    .find(|n| n.title.eq_ignore_ascii_case(clean_title))
+                    .map(|n| n.id);
+
+                let note_id = if let Some(id) = existing_id {
+                    id
+                } else {
+                    let note_directory = storage::ensure_note_folder(
+                        &self.storage_paths.notes_dir,
+                        &self.settings.selected_folder,
+                    )
+                    .unwrap_or_else(|_| self.storage_paths.notes_dir.clone());
+                    let id = self.data.create_note_named(&note_directory, clean_title);
+                    if let Some(note) = self.data.notes.iter_mut().find(|n| n.id == id) {
+                        note.content = format!("# {}\n\n", clean_title);
+                    }
+                    id
+                };
+
+                if let Some(note) = self.data.notes.iter_mut().find(|n| n.id == note_id) {
+                    if !note.content.is_empty() && !note.content.ends_with('\n') {
+                        note.content.push('\n');
+                    }
+                    note.content.push_str(&entry);
+                    note.mark_as_updated();
+                    self.link_index.refresh_note_content(note);
+                }
+
+                self.save_note_now(note_id);
+                self.storage_message = Some(format!("Captured to '{clean_title}'"));
+                note_id
+            }
+        };
+
+        // Record in recent notes
+        self.settings
+            .recent_note_ids
+            .retain(|&recent_id| recent_id != captured_note_id);
+        self.settings.recent_note_ids.insert(0, captured_note_id);
+        self.settings.recent_note_ids.truncate(15);
+        self.save_settings();
     }
 
     fn create_folder_from_input(&mut self) {
@@ -1061,7 +1191,7 @@ impl WidgetApp {
     }
 
     fn reload_vault(&mut self, reason: &str) {
-        match storage::reload_notes(&self.storage_paths) {
+        match storage::reload_notes(&self.storage_paths, &self.settings) {
             Ok((notes, warnings, folders)) => {
                 let selected = self.data.selected_note_id;
                 self.data.notes = notes;
@@ -1317,7 +1447,7 @@ impl WidgetApp {
         });
         ui.add_space(6.0);
         if ui.button("Scan vault now").clicked() {
-            self.diagnostics = storage::vault_diagnostics(&self.storage_paths)
+            self.diagnostics = storage::vault_diagnostics(&self.storage_paths, &self.settings)
                 .unwrap_or_else(|error| vec![format!("Diagnostics failed: {error}")]);
         }
         if self.diagnostics.is_empty() {
@@ -1554,15 +1684,39 @@ impl WidgetApp {
                     });
                     ui.horizontal(|ui| {
                         ui.label("Default daily template:");
-                        ui.text_edit_singleline(&mut self.settings.default_daily_template);
+                        let available_templates = TemplateEngine::list_templates(
+                            &self.storage_paths.notes_dir,
+                            &self.settings.templates_folder,
+                        );
+                        egui::ComboBox::from_id_salt("default_daily_template_combo")
+                            .selected_text(if self.settings.default_daily_template.is_empty() {
+                                "(None / Default Format)".to_owned()
+                            } else {
+                                self.settings.default_daily_template.clone()
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut self.settings.default_daily_template,
+                                    String::new(),
+                                    "(None / Default Format)",
+                                );
+                                for t in available_templates {
+                                    ui.selectable_value(
+                                        &mut self.settings.default_daily_template,
+                                        t.name.clone(),
+                                        &t.name,
+                                    );
+                                }
+                            });
                     });
                     ui.horizontal(|ui| {
                         ui.label("Quick capture target:");
                         egui::ComboBox::from_id_salt("quick_capture_target_combo")
-                            .selected_text(match self.settings.quick_capture_target {
+                            .selected_text(match &self.settings.quick_capture_target {
                                 QuickCaptureTarget::DailyNote => "Today's Daily Note",
                                 QuickCaptureTarget::Inbox => "Inbox.md",
                                 QuickCaptureTarget::NewNote => "Create New Timestamped Note",
+                                QuickCaptureTarget::CustomNote(_) => "Specific Custom Note",
                             })
                             .show_ui(ui, |ui| {
                                 ui.selectable_value(
@@ -1580,9 +1734,126 @@ impl WidgetApp {
                                     QuickCaptureTarget::NewNote,
                                     "Create New Timestamped Note",
                                 );
+                                ui.selectable_value(
+                                    &mut self.settings.quick_capture_target,
+                                    QuickCaptureTarget::CustomNote(
+                                        self.settings.quick_capture_custom_note.clone(),
+                                    ),
+                                    "Specific Custom Note",
+                                );
                             });
                     });
+                    if matches!(
+                        self.settings.quick_capture_target,
+                        QuickCaptureTarget::CustomNote(_)
+                    ) {
+                        ui.horizontal(|ui| {
+                            ui.label("Custom note name:");
+                            if ui
+                                .text_edit_singleline(&mut self.settings.quick_capture_custom_note)
+                                .changed()
+                            {
+                                self.settings.quick_capture_target = QuickCaptureTarget::CustomNote(
+                                    self.settings.quick_capture_custom_note.clone(),
+                                );
+                            }
+                        });
+                    }
                 });
+            });
+
+            ui.add_space(7.0);
+            ui_style::card_frame(ui).show(ui, |ui| {
+                egui::CollapsingHeader::new(egui::RichText::new("Attachments").strong())
+                    .id_salt("settings_attachments")
+                    .show(ui, |ui| {
+                        ui_style::muted(
+                            ui,
+                            "Manage vault attachments, paste screenshots and cleanup orphaned files",
+                        );
+                        ui.horizontal(|ui| {
+                            ui.label("Attachments folder:");
+                            let mut folder_str =
+                                self.settings.attachments_folder.display().to_string();
+                            if ui.text_edit_singleline(&mut folder_str).changed() {
+                                self.settings.attachments_folder = PathBuf::from(folder_str);
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            if ui.button("Inspect Orphaned Attachments").clicked() {
+                                match crate::attachments::AttachmentManager::find_orphaned_attachments(
+                                    &self.data.notes,
+                                    &self.storage_paths.notes_dir,
+                                    &self.settings.attachments_folder,
+                                ) {
+                                    Ok(orphans) => {
+                                        self.attachments_orphans = orphans;
+                                        self.attachments_inspected = true;
+                                    }
+                                    Err(error) => {
+                                        self.attachments_orphans.clear();
+                                        self.attachments_inspected = false;
+                                        self.storage_message = Some(error);
+                                    }
+                                }
+                            }
+                        });
+
+                        if self.attachments_inspected {
+                            if self.attachments_orphans.is_empty() {
+                                ui_style::muted(ui, "✓ No orphaned attachment files found.");
+                            } else {
+                                ui.label(format!(
+                                    "Found {} unreferenced attachment(s):",
+                                    self.attachments_orphans.len()
+                                ));
+                                let mut delete_orphan_path = None;
+                                egui::ScrollArea::vertical()
+                                    .max_height(140.0)
+                                    .show(ui, |ui| {
+                                        for orphan in &self.attachments_orphans {
+                                            let file_name = orphan
+                                                .file_name()
+                                                .unwrap_or_default()
+                                                .to_string_lossy();
+                                            ui.horizontal(|ui| {
+                                                ui.label(format!("• {file_name}"));
+                                                if ui.small_button("Delete").clicked() {
+                                                    delete_orphan_path = Some(orphan.clone());
+                                                }
+                                            });
+                                        }
+                                    });
+
+                                if let Some(path_to_del) = delete_orphan_path {
+                                    match std::fs::remove_file(&path_to_del) {
+                                        Ok(()) => {
+                                            self.attachments_orphans.retain(|p| p != &path_to_del);
+                                            self.storage_message =
+                                                Some("Deleted orphaned attachment".to_owned());
+                                        }
+                                        Err(error) => {
+                                            self.storage_message = Some(format!(
+                                                "Failed to delete orphaned attachment: {error}"
+                                            ));
+                                        }
+                                    }
+                                }
+
+                                if ui.button("Clean Up All Orphans").clicked() {
+                                    let mut count = 0;
+                                    for orphan in &self.attachments_orphans {
+                                        if std::fs::remove_file(orphan).is_ok() {
+                                            count += 1;
+                                        }
+                                    }
+                                    self.attachments_orphans.retain(|path| path.exists());
+                                    self.storage_message =
+                                        Some(format!("Deleted {count} orphaned file(s)"));
+                                }
+                            }
+                        }
+                    });
             });
 
             ui.add_space(7.0);
@@ -1651,6 +1922,29 @@ impl WidgetApp {
                             &mut self.settings.shortcuts.graph_overlay,
                         );
                         shortcut_field(ui, "Save", &mut self.settings.shortcuts.save);
+
+                        ui.add_space(6.0);
+                        let hotkey_enabled_before = self.settings.global_quick_capture_enabled;
+                        let hotkey_str_before = self.settings.global_quick_capture_shortcut.clone();
+
+                        ui.checkbox(
+                            &mut self.settings.global_quick_capture_enabled,
+                            "System-wide Quick Capture hotkey (works when minimized)",
+                        );
+                        shortcut_field(
+                            ui,
+                            "Global Quick Capture",
+                            &mut self.settings.global_quick_capture_shortcut,
+                        );
+
+                        if hotkey_enabled_before != self.settings.global_quick_capture_enabled
+                            || hotkey_str_before != self.settings.global_quick_capture_shortcut
+                        {
+                            self.hotkey_manager.update_shortcut(
+                                self.settings.global_quick_capture_enabled,
+                                &self.settings.global_quick_capture_shortcut,
+                            );
+                        }
                     });
             });
 
@@ -1938,12 +2232,60 @@ impl WidgetApp {
             return;
         }
 
+        if !self.is_navigating_history
+            && let Some(cur_id) = self.data.selected_note_id
+            && cur_id != id
+        {
+            self.history_back.push(cur_id);
+            self.history_forward.clear();
+            if self.history_back.len() > 50 {
+                self.history_back.remove(0);
+            }
+        }
+
         self.data.selected_note_id = Some(id);
         self.pending_delete_id = None;
         self.view = AppView::Editor;
         self.focus_search = false;
         self.focus_editor = true;
+
+        self.settings
+            .recent_note_ids
+            .retain(|&recent_id| recent_id != id);
+        self.settings.recent_note_ids.insert(0, id);
+        self.settings.recent_note_ids.truncate(15);
+
         self.save_settings();
+    }
+
+    fn navigate_back(&mut self) {
+        while let Some(prev_id) = self.history_back.pop() {
+            if self.data.notes.iter().any(|note| note.id == prev_id) {
+                if let Some(cur_id) = self.data.selected_note_id {
+                    self.history_forward.push(cur_id);
+                }
+                self.is_navigating_history = true;
+                self.open_note(prev_id);
+                self.is_navigating_history = false;
+                self.activate_view(AppView::Editor);
+                break;
+            }
+        }
+    }
+
+    fn navigate_forward(&mut self) {
+        while let Some(next_id) = self.history_forward.pop() {
+            if self.data.notes.iter().any(|note| note.id == next_id) {
+                if let Some(cur_id) = self.data.selected_note_id {
+                    self.history_back.push(cur_id);
+                }
+                self.is_navigating_history = true;
+                self.open_note(next_id);
+                self.is_navigating_history = false;
+                self.activate_view(AppView::Editor);
+                break;
+            }
+        }
     }
 
     fn navigate_note_list(&mut self, direction: isize) {
@@ -2044,6 +2386,9 @@ impl WidgetApp {
                 self.data.remove_note(id);
                 self.link_index = LinkIndex::build(&self.data.notes, &self.storage_paths.notes_dir);
                 self.dirty_note_ids.remove(&id);
+                self.settings
+                    .recent_note_ids
+                    .retain(|&recent_id| recent_id != id);
                 self.pending_delete_id = None;
                 self.vault_snapshot =
                     storage::vault_snapshot(&self.storage_paths.notes_dir).unwrap_or_default();
@@ -2211,6 +2556,71 @@ impl WidgetApp {
         in_daily_folder || title_is_date
     }
 
+    fn render_tag_node(
+        ui: &mut egui::Ui,
+        node: &crate::tags::TagTreeNode,
+        current_query: &str,
+        filter_tag: &mut Option<String>,
+        rename_tag_target: &mut Option<String>,
+    ) {
+        let tag_query = format!("tag:{}", node.full_tag);
+        let is_active = current_query.contains(&tag_query);
+        let label_text = format!("#{} ({})", node.name, node.count);
+
+        if node.children.is_empty() {
+            let resp = ui
+                .selectable_label(is_active, label_text)
+                .on_hover_text(format!(
+                    "Filter notes by #{}\nRight-click to rename",
+                    node.full_tag
+                ));
+            if resp.clicked() {
+                *filter_tag = Some(node.full_tag.clone());
+            }
+            resp.context_menu(|ui| {
+                if ui.button("Filter Notes").clicked() {
+                    *filter_tag = Some(node.full_tag.clone());
+                    ui.close();
+                }
+                if ui.button("Rename Tag across Vault...").clicked() {
+                    *rename_tag_target = Some(node.full_tag.clone());
+                    ui.close();
+                }
+            });
+        } else {
+            let id = ui.make_persistent_id(format!("tag_tree_{}", node.full_tag));
+            egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
+                .show_header(ui, |ui| {
+                    let resp =
+                        ui.selectable_label(is_active, format!("#{} ({})", node.name, node.count));
+                    if resp.clicked() {
+                        *filter_tag = Some(node.full_tag.clone());
+                    }
+                    resp.context_menu(|ui| {
+                        if ui.button("Filter Notes").clicked() {
+                            *filter_tag = Some(node.full_tag.clone());
+                            ui.close();
+                        }
+                        if ui.button("Rename Tag across Vault...").clicked() {
+                            *rename_tag_target = Some(node.full_tag.clone());
+                            ui.close();
+                        }
+                    });
+                })
+                .body(|ui| {
+                    for child in &node.children {
+                        Self::render_tag_node(
+                            ui,
+                            child,
+                            current_query,
+                            filter_tag,
+                            rename_tag_target,
+                        );
+                    }
+                });
+        }
+    }
+
     fn show_left_explorer(&mut self, ui: &mut egui::Ui) {
         let mut create_note_clicked = false;
         let mut submit_new_folder = false;
@@ -2295,6 +2705,158 @@ impl WidgetApp {
         if let Some(id) = open_pinned_id {
             self.open_note(id);
             self.activate_view(AppView::Editor);
+        }
+
+        // Recent notes section
+        let recent_notes_list: Vec<(Uuid, String, String)> = self
+            .settings
+            .recent_note_ids
+            .iter()
+            .filter_map(|&id| {
+                self.data.notes.iter().find(|n| n.id == id).map(|n| {
+                    let title = if n.title.trim().is_empty() {
+                        "Untitled".to_owned()
+                    } else {
+                        n.title.clone()
+                    };
+                    let updated = n.updated_at.format("%d/%m %H:%M").to_string();
+                    (n.id, title, updated)
+                })
+            })
+            .take(6)
+            .collect();
+
+        let mut open_recent_id = None;
+        if !recent_notes_list.is_empty() {
+            ui.add_space(2.0);
+            ui.collapsing(
+                egui::RichText::new(format!("🕒 Recent ({})", recent_notes_list.len())).strong(),
+                |ui| {
+                    for (recent_id, recent_title, updated) in recent_notes_list {
+                        let selected = self.data.selected_note_id == Some(recent_id);
+                        if ui
+                            .selectable_label(selected, format!("• {recent_title}"))
+                            .on_hover_text(format!("Updated {updated}"))
+                            .clicked()
+                        {
+                            open_recent_id = Some(recent_id);
+                        }
+                    }
+                },
+            );
+        }
+        if let Some(id) = open_recent_id {
+            self.open_note(id);
+            self.activate_view(AppView::Editor);
+        }
+
+        // Tags section
+        let tag_tree = self.tag_index.build_tree();
+        if !tag_tree.is_empty() {
+            ui.add_space(2.0);
+            let mut filter_tag = None;
+            let mut rename_tag_target = None;
+            ui.collapsing(
+                egui::RichText::new(format!("🏷️ Tags ({})", self.tag_index.all_tags().len()))
+                    .strong(),
+                |ui| {
+                    for node in &tag_tree {
+                        Self::render_tag_node(
+                            ui,
+                            node,
+                            &self.search_query,
+                            &mut filter_tag,
+                            &mut rename_tag_target,
+                        );
+                    }
+                },
+            );
+            if let Some(tag) = filter_tag {
+                self.search_query = format!("tag:{tag}");
+                self.focus_search = false;
+            }
+            if let Some(tag) = rename_tag_target {
+                self.tag_to_rename = tag.clone();
+                self.tag_new_name_buffer = tag;
+                self.tag_rename_dialog_open = true;
+            }
+        }
+
+        // Saved Searches section
+        let mut delete_preset_id = None;
+        let mut apply_preset_query = None;
+        if !self.settings.search_presets.is_empty() || !self.search_query.trim().is_empty() {
+            ui.add_space(2.0);
+            ui.collapsing(
+                egui::RichText::new(format!(
+                    "⭐ Saved Searches ({})",
+                    self.settings.search_presets.len()
+                ))
+                .strong(),
+                |ui| {
+                    for preset in &self.settings.search_presets {
+                        let is_active = self.search_query == preset.query;
+                        ui.horizontal(|ui| {
+                            if ui
+                                .selectable_label(is_active, format!("• {}", preset.name))
+                                .on_hover_text(&preset.query)
+                                .clicked()
+                            {
+                                apply_preset_query = Some(preset.query.clone());
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .small_button("×")
+                                        .on_hover_text("Delete preset")
+                                        .clicked()
+                                    {
+                                        delete_preset_id = Some(preset.id);
+                                    }
+                                },
+                            );
+                        });
+                    }
+
+                    if !self.search_query.trim().is_empty() {
+                        ui.add_space(4.0);
+                        if !self.show_new_preset_input {
+                            if ui.button("+ Save active search...").clicked() {
+                                self.show_new_preset_input = true;
+                                self.new_preset_name_buffer =
+                                    format!("Search: {}", self.search_query.trim());
+                            }
+                        } else {
+                            ui.horizontal(|ui| {
+                                ui.text_edit_singleline(&mut self.new_preset_name_buffer);
+                                if ui.small_button("Save").clicked()
+                                    && !self.new_preset_name_buffer.trim().is_empty()
+                                {
+                                    self.settings.search_presets.push(SearchPreset {
+                                        id: Uuid::new_v4(),
+                                        name: self.new_preset_name_buffer.trim().to_owned(),
+                                        query: self.search_query.trim().to_owned(),
+                                    });
+                                    self.save_settings();
+                                    self.show_new_preset_input = false;
+                                }
+                                if ui.small_button("Cancel").clicked() {
+                                    self.show_new_preset_input = false;
+                                }
+                            });
+                        }
+                    }
+                },
+            );
+        }
+        if let Some(id) = delete_preset_id {
+            self.settings.search_presets.retain(|p| p.id != id);
+            self.save_settings();
+        }
+        if let Some(query) = apply_preset_query {
+            self.search_query = query;
+            self.focus_search = false;
         }
 
         ui.add_space(4.0);
@@ -2453,6 +3015,7 @@ impl WidgetApp {
         let editor_id = ui.make_persistent_id(("markdown_editor", note.id));
         let mut navigate_to_note = None;
         let mut jump_cursor_idx = None;
+        let mut create_unresolved_target = None;
 
         let outgoing_links: Vec<(Uuid, String)> = self
             .link_index
@@ -2571,6 +3134,31 @@ impl WidgetApp {
 
             // 3. Properties: Tags and Aliases
             self.show_note_properties(ui, note.id);
+
+            // 4. Unresolved Links in this note & vault
+            let unresolved_here: Vec<String> = self
+                .link_index
+                .links_for(note.id)
+                .map(|l| l.unresolved.clone())
+                .unwrap_or_default();
+
+            if !unresolved_here.is_empty() {
+                ui.add_space(6.0);
+                ui.collapsing(
+                    egui::RichText::new(format!("Unresolved Links ({})", unresolved_here.len()))
+                        .strong(),
+                    |ui| {
+                        for target in &unresolved_here {
+                            ui.horizontal(|ui| {
+                                ui.label(format!("• {target}"));
+                                if ui.small_button("+ Create").clicked() {
+                                    create_unresolved_target = Some(target.clone());
+                                }
+                            });
+                        }
+                    },
+                );
+            }
         });
 
         if let Some(idx) = jump_cursor_idx {
@@ -2578,6 +3166,9 @@ impl WidgetApp {
         }
         if let Some(id) = navigate_to_note {
             self.open_note(id);
+        }
+        if let Some(target) = create_unresolved_target {
+            self.create_note_from_link(&target);
         }
     }
 
@@ -2638,10 +3229,29 @@ impl WidgetApp {
     }
 
     fn handle_command_action(&mut self, action: CommandAction) {
+        self.settings
+            .recent_commands
+            .retain(|&recent_action| recent_action != action);
+        self.settings.recent_commands.insert(0, action);
+        self.settings.recent_commands.truncate(8);
+        self.save_settings();
+
         match action {
             CommandAction::OpenTodayNote => self.open_or_create_daily_note(0),
             CommandAction::OpenYesterdayNote => self.open_or_create_daily_note(-1),
             CommandAction::OpenTomorrowNote => self.open_or_create_daily_note(1),
+            CommandAction::OpenPrevDayNote => {
+                let cur = self
+                    .current_daily_note_date()
+                    .unwrap_or_else(LocalDateService::today);
+                self.open_or_create_daily_note_for_date(LocalDateService::prev_day(cur));
+            }
+            CommandAction::OpenNextDayNote => {
+                let cur = self
+                    .current_daily_note_date()
+                    .unwrap_or_else(LocalDateService::today);
+                self.open_or_create_daily_note_for_date(LocalDateService::next_day(cur));
+            }
             CommandAction::QuickCapture => self.quick_capture_state.open(),
             CommandAction::NewNoteFromTemplate => {
                 self.template_selector_open = true;
@@ -2742,6 +3352,22 @@ impl WidgetApp {
                     }
                 }
             }
+            CommandAction::SaveCurrentSearch => {
+                if !self.search_query.trim().is_empty() {
+                    let name = format!("Search: {}", self.search_query.trim());
+                    self.settings.search_presets.push(SearchPreset {
+                        id: Uuid::new_v4(),
+                        name,
+                        query: self.search_query.trim().to_owned(),
+                    });
+                    self.save_settings();
+                    self.storage_message = Some("Saved search preset".to_owned());
+                }
+            }
+            CommandAction::ClearSearch => {
+                self.search_query.clear();
+                self.focus_search = false;
+            }
         }
     }
 }
@@ -2749,6 +3375,17 @@ impl WidgetApp {
 impl eframe::App for WidgetApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+
+        while let Some(event) = self.hotkey_manager.try_recv() {
+            match event {
+                GlobalHotkeyEvent::QuickCapture => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    self.quick_capture_state.open();
+                    ctx.request_repaint();
+                }
+            }
+        }
 
         if !self.window_settings_applied {
             ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
@@ -2939,6 +3576,17 @@ impl eframe::App for WidgetApp {
             }
         }
 
+        let navigate_back_shortcut =
+            ctx.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::ArrowLeft));
+        let navigate_forward_shortcut =
+            ctx.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::ArrowRight));
+        if navigate_back_shortcut {
+            self.navigate_back();
+        }
+        if navigate_forward_shortcut {
+            self.navigate_forward();
+        }
+
         if save_shortcut && !self.external_conflict {
             self.flush_dirty_notes();
         }
@@ -3106,6 +3754,38 @@ impl eframe::App for WidgetApp {
 
                             if ui.available_width() >= 40.0 {
                                 ui.label(egui::RichText::new("Lilo").strong().size(14.0));
+                            }
+
+                            // History Back / Forward navigation buttons
+                            let back_enabled = !self.history_back.is_empty();
+                            let forward_enabled = !self.history_forward.is_empty();
+                            let mut nav_back = false;
+                            let mut nav_forward = false;
+
+                            ui.add_enabled_ui(back_enabled, |ui| {
+                                if ui
+                                    .small_button("◀")
+                                    .on_hover_text("Navigate Back (Alt+Left)")
+                                    .clicked()
+                                {
+                                    nav_back = true;
+                                }
+                            });
+                            ui.add_enabled_ui(forward_enabled, |ui| {
+                                if ui
+                                    .small_button("▶")
+                                    .on_hover_text("Navigate Forward (Alt+Right)")
+                                    .clicked()
+                                {
+                                    nav_forward = true;
+                                }
+                            });
+
+                            if nav_back {
+                                self.navigate_back();
+                            }
+                            if nav_forward {
+                                self.navigate_forward();
                             }
 
                             // Quick navigation icons if left sidebar is hidden
@@ -3374,31 +4054,58 @@ impl eframe::App for WidgetApp {
                                                         .data
                                                         .selected_note()
                                                         .is_some_and(|n| self.is_daily_note(n));
-                                                    let mut daily_nav_delta = None;
+                                                    let mut daily_nav_target = None;
 
                                                     if let Some(note) = self.data.selected_note_mut() {
                                                         // Daily Notes Navigation Banner
                                                         if is_daily {
-                                                            let note_title = note.title.clone();
+                                                            let rel = note
+                                                                .file_path
+                                                                .strip_prefix(&self.storage_paths.notes_dir)
+                                                                .unwrap_or(&note.file_path);
+                                                            let current_date = LocalDateService::parse_date_from_note(&note.title, rel)
+                                                                .unwrap_or_else(LocalDateService::today);
+                                                            let prev_date = LocalDateService::prev_day(current_date);
+                                                            let next_date = LocalDateService::next_day(current_date);
+                                                            let is_today = LocalDateService::is_today(current_date);
+                                                            let display_date_str = LocalDateService::format_daily_display(current_date);
+
                                                             ui.horizontal(|ui| {
                                                                 if ui
-                                                                    .button("← Yesterday")
-                                                                    .on_hover_text("Open yesterday's daily note")
+                                                                    .button("← Prev Day")
+                                                                    .on_hover_text(format!("Open daily note for {}", prev_date.format("%Y-%m-%d")))
                                                                     .clicked()
                                                                 {
-                                                                    daily_nav_delta = Some(-1);
+                                                                    daily_nav_target = Some(prev_date);
                                                                 }
+
                                                                 ui.label(
-                                                                    egui::RichText::new(format!("📅 {note_title}"))
+                                                                    egui::RichText::new(format!("📅 {display_date_str}"))
                                                                         .strong()
                                                                         .color(ui.visuals().hyperlink_color),
                                                                 );
-                                                                if ui
-                                                                    .button("Tomorrow →")
-                                                                    .on_hover_text("Open tomorrow's daily note")
+
+                                                                if is_today {
+                                                                    ui.label(
+                                                                        egui::RichText::new("[Today]")
+                                                                            .small()
+                                                                            .strong()
+                                                                            .color(ui.visuals().selection.bg_fill),
+                                                                    );
+                                                                } else if ui
+                                                                    .button("Today")
+                                                                    .on_hover_text("Jump to today's daily note")
                                                                     .clicked()
                                                                 {
-                                                                    daily_nav_delta = Some(1);
+                                                                    daily_nav_target = Some(LocalDateService::today());
+                                                                }
+
+                                                                if ui
+                                                                    .button("Next Day →")
+                                                                    .on_hover_text(format!("Open daily note for {}", next_date.format("%Y-%m-%d")))
+                                                                    .clicked()
+                                                                {
+                                                                    daily_nav_target = Some(next_date);
                                                                 }
                                                             });
                                                             ui.add_space(6.0);
@@ -3465,12 +4172,118 @@ impl eframe::App for WidgetApp {
                                                             command_changed = true;
                                                         }
 
+                                                        // Drag & Drop Attachment Files
+                                                        let dropped_files = ui.ctx().input(|i| i.raw.dropped_files.clone());
+                                                        if !dropped_files.is_empty() {
+                                                            for dropped in dropped_files {
+                                                                let path = dropped.path();
+                                                                if !path.as_os_str().is_empty()
+                                                                    && let Ok(rel_link) = crate::attachments::AttachmentManager::import_file(
+                                                                        path,
+                                                                        &self.storage_paths.notes_dir,
+                                                                        &self.settings.attachments_folder,
+                                                                    )
+                                                                {
+                                                                    let is_img = matches!(
+                                                                        path.extension().and_then(|e| e.to_str()).map(|s| s.to_lowercase()).as_deref(),
+                                                                        Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "svg")
+                                                                    );
+                                                                    let name = path.file_name().unwrap_or_default().to_string_lossy();
+                                                                    markdown::insert_attachment_link(
+                                                                        ui.ctx(),
+                                                                        editor_id,
+                                                                        &mut note.content,
+                                                                        &name,
+                                                                        &rel_link,
+                                                                        is_img,
+                                                                    );
+                                                                    command_changed = true;
+                                                                    self.storage_message = Some(format!("Imported attachment: {rel_link}"));
+                                                                }
+                                                            }
+                                                        }
+
+                                                        // Clipboard Paste (Ctrl+V / Shift+Insert / Paste event) Screenshot & Image Ingestion
+                                                        let mut trigger_paste_image = ui.ctx().input(|input| {
+                                                            let ctrl_or_cmd = input.modifiers.ctrl || input.modifiers.command;
+                                                            (ctrl_or_cmd && (
+                                                                input.key_pressed(egui::Key::V)
+                                                                || input.events.iter().any(|e| match e {
+                                                                    egui::Event::Key { key, physical_key, pressed: true, .. } => {
+                                                                        *key == egui::Key::V || *physical_key == Some(egui::Key::V)
+                                                                    }
+                                                                    egui::Event::Paste(_) => true,
+                                                                    egui::Event::Text(t) => t.contains('\x16') || t.contains('v') || t.contains('V') || t.contains('м') || t.contains('М'),
+                                                                    _ => false,
+                                                                })
+                                                            )) || (input.modifiers.shift && input.key_pressed(egui::Key::Insert))
+                                                            || input.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))
+                                                        });
+
+                                                        // Formatting & Quick Tools toolbar
+                                                        ui.horizontal(|ui| {
+                                                            if ui
+                                                                .small_button("📷 Paste Image")
+                                                                .on_hover_text("Paste screenshot or image from clipboard (Ctrl+V)")
+                                                                .clicked()
+                                                            {
+                                                                trigger_paste_image = true;
+                                                            }
+                                                            if ui.small_button("B").on_hover_text("Bold (Ctrl+B)").clicked() {
+                                                                markdown_command = Some(markdown::MarkdownCommand::Bold);
+                                                            }
+                                                            if ui.small_button("I").on_hover_text("Italic (Ctrl+I)").clicked() {
+                                                                markdown_command = Some(markdown::MarkdownCommand::Italic);
+                                                            }
+                                                            if ui.small_button("`code`").on_hover_text("Inline Code").clicked() {
+                                                                markdown_command = Some(markdown::MarkdownCommand::InlineCode);
+                                                            }
+                                                            if ui.small_button("[[link]]").on_hover_text("Wiki-Link").clicked() {
+                                                                markdown_command = Some(markdown::MarkdownCommand::WikiLink);
+                                                            }
+                                                            if ui.small_button("☑ Task").on_hover_text("Task checkbox").clicked() {
+                                                                markdown_command = Some(markdown::MarkdownCommand::Task);
+                                                            }
+                                                        });
+                                                        ui.add_space(4.0);
+
+                                                        if trigger_paste_image {
+                                                            match crate::attachments::AttachmentManager::try_save_clipboard_image(
+                                                                &self.storage_paths.notes_dir,
+                                                                &self.settings.attachments_folder,
+                                                            ) {
+                                                                Ok(Some(rel_link)) => {
+                                                                    ui.ctx().input_mut(|i| {
+                                                                        i.consume_key(egui::Modifiers::COMMAND, egui::Key::V);
+                                                                        i.consume_key(egui::Modifiers::CTRL, egui::Key::V);
+                                                                        i.consume_key(egui::Modifiers::SHIFT, egui::Key::Insert);
+                                                                    });
+                                                                    markdown::insert_attachment_link(
+                                                                        ui.ctx(),
+                                                                        editor_id,
+                                                                        &mut note.content,
+                                                                        "Pasted Image",
+                                                                        &rel_link,
+                                                                        true,
+                                                                    );
+                                                                    command_changed = true;
+                                                                    self.storage_message = Some(format!("Pasted image saved: {rel_link}"));
+                                                                }
+                                                                Ok(None) => {
+                                                                    // Normal text in clipboard - let show_editor TextEdit handle it
+                                                                }
+                                                                Err(err) => {
+                                                                    self.storage_message = Some(format!("Clipboard: {err}"));
+                                                                }
+                                                            }
+                                                        }
+
                                                         let editor_output = markdown::show_editor(
-                                                            ui,
-                                                            &mut note.content,
-                                                            editor_id,
-                                                            self.settings.editor_font_size,
-                                                        );
+                                                             ui,
+                                                             &mut note.content,
+                                                             editor_id,
+                                                             self.settings.editor_font_size,
+                                                         );
 
                                                         let hovered_character = markdown::hovered_character(ui, &editor_output);
                                                         let checkbox_toggled =
@@ -3519,25 +4332,153 @@ impl eframe::App for WidgetApp {
                                                             note.mark_as_updated();
                                                             changed_note_id = Some(note.id);
                                                         }
-                                                    } else {
-                                                        ui.label("No notes yet.");
-                                                        if ui.button("Create note").clicked() {
-                                                            self.create_note();
+
+                                                        // Render Embedded Attached Images right in note view
+                                                        let embedded_attachments = crate::attachments::extract_attachments_from_markdown(&note.content);
+                                                        if !embedded_attachments.is_empty() {
+                                                            let valid_images: Vec<(PathBuf, String)> = embedded_attachments
+                                                                .iter()
+                                                                .filter_map(|att| {
+                                                                    let full = self.storage_paths.notes_dir.join(att);
+                                                                    if full.exists() {
+                                                                        let name = full.file_name().unwrap_or_default().to_string_lossy().to_string();
+                                                                        Some((full, name))
+                                                                    } else {
+                                                                        None
+                                                                    }
+                                                                })
+                                                                .collect();
+
+                                                            if !valid_images.is_empty() {
+                                                                ui.add_space(16.0);
+                                                                ui.separator();
+                                                                ui.add_space(8.0);
+                                                                ui.label(
+                                                                    egui::RichText::new("📷 Attached Images")
+                                                                        .strong()
+                                                                        .color(ui.visuals().weak_text_color()),
+                                                                );
+                                                                ui.add_space(8.0);
+
+                                                                for (full_path, name) in valid_images {
+                                                                    if let Ok(bytes) = std::fs::read(&full_path) {
+                                                                        ui.group(|ui| {
+                                                                            ui.label(egui::RichText::new(format!("🖼 {name}")).small());
+                                                                            ui.add_space(4.0);
+                                                                            let max_w = (ui.available_width() - 20.0).max(100.0);
+                                                                            let uri_key = format!("bytes://{}", name);
+                                                                            let img = egui::Image::from_bytes(uri_key, bytes)
+                                                                                .max_width(max_w)
+                                                                                .corner_radius(egui::CornerRadius::same(6));
+                                                                            ui.add(img);
+                                                                        });
+                                                                        ui.add_space(8.0);
+                                                                    }
+                                                                }
+                                                            }
                                                         }
+                                                    } else {
+                                                        ui.add_space(32.0);
+                                                        ui.vertical_centered(|ui| {
+                                                            ui.label(
+                                                                egui::RichText::new("📝 Lilo")
+                                                                    .size(26.0)
+                                                                    .strong()
+                                                                    .color(ui.visuals().hyperlink_color),
+                                                            );
+                                                            ui.add_space(4.0);
+                                                            ui.label(
+                                                                egui::RichText::new(
+                                                                    "Local-first Markdown notes & daily workflow",
+                                                                )
+                                                                .small()
+                                                                .color(ui.visuals().weak_text_color()),
+                                                            );
+                                                            ui.add_space(16.0);
+
+                                                            ui.horizontal_wrapped(|ui| {
+                                                                if ui.button("✨ New Note (Ctrl+N)").clicked() {
+                                                                    self.create_note();
+                                                                }
+                                                                if ui.button("📅 Today's Note (Alt+D)").clicked() {
+                                                                    self.open_or_create_daily_note(0);
+                                                                }
+                                                                if ui.button("⚡ Quick Capture (Ctrl+Shift+C)").clicked() {
+                                                                    self.quick_capture_state.open();
+                                                                }
+                                                                if ui.button("📝 Templates...").clicked() {
+                                                                    self.template_selector_open = true;
+                                                                    self.template_selector_for_new_note = true;
+                                                                }
+                                                                if ui.button("🔍 Commands (Ctrl+P)").clicked() {
+                                                                    self.command_palette_state.open();
+                                                                }
+                                                            });
+
+                                                            let recent_preview: Vec<(Uuid, String)> = self
+                                                                .settings
+                                                                .recent_note_ids
+                                                                .iter()
+                                                                .filter_map(|&id| {
+                                                                    self.data.notes.iter().find(|n| n.id == id).map(|n| {
+                                                                        let title = if n.title.trim().is_empty() {
+                                                                            "Untitled".to_owned()
+                                                                        } else {
+                                                                            n.title.clone()
+                                                                        };
+                                                                        (n.id, title)
+                                                                    })
+                                                                })
+                                                                .take(5)
+                                                                .collect();
+
+                                                            if !recent_preview.is_empty() {
+                                                                ui.add_space(20.0);
+                                                                ui.separator();
+                                                                ui.add_space(8.0);
+                                                                ui.label(
+                                                                    egui::RichText::new("Recent Notes")
+                                                                        .strong()
+                                                                        .color(ui.visuals().weak_text_color()),
+                                                                );
+                                                                ui.add_space(6.0);
+                                                                for (r_id, r_title) in recent_preview {
+                                                                    if ui.button(format!("📄 {r_title}")).clicked() {
+                                                                        self.open_note(r_id);
+                                                                    }
+                                                                }
+                                                            }
+                                                        });
+                                                        ui.add_space(32.0);
                                                     }
 
                                                     if let Some(id) = changed_note_id {
                                                         if note_name_changed {
+                                                            if let Some(note) = self.data.notes.iter().find(|note| note.id == id) {
+                                                                let new_title = note.title.clone();
+                                                                let old_title = self.note_titles_snapshot.get(&id).cloned().unwrap_or_default();
+                                                                if !old_title.is_empty() && old_title != new_title {
+                                                                    let modified_note_ids = links::rename_note_references(&mut self.data.notes, &old_title, &new_title);
+                                                                    let ref_count = modified_note_ids.len();
+                                                                    self.dirty_note_ids.extend(modified_note_ids);
+                                                                    if ref_count > 0 {
+                                                                        self.storage_message = Some(format!("Updated {ref_count} note reference(s) across vault"));
+                                                                    }
+                                                                    self.note_titles_snapshot.insert(id, new_title);
+                                                                }
+                                                            }
                                                             self.pending_title_rename_ids.insert(id);
                                                             self.link_index = LinkIndex::build(
                                                                 &self.data.notes,
                                                                 &self.storage_paths.notes_dir,
                                                             );
+                                                            self.tag_index = TagIndex::build(&self.data.notes);
                                                         } else if note_content_changed
                                                             && let Some(note) =
                                                                 self.data.notes.iter().find(|note| note.id == id)
                                                         {
                                                             self.link_index.refresh_note_content(note);
+                                                            self.tag_index = TagIndex::build(&self.data.notes);
                                                         }
                                                         self.mark_note_dirty(id);
                                                     }
@@ -3554,8 +4495,8 @@ impl eframe::App for WidgetApp {
                                                         }
                                                     }
 
-                                                    if let Some(delta) = daily_nav_delta {
-                                                        self.open_or_create_daily_note(delta);
+                                                    if let Some(target_date) = daily_nav_target {
+                                                        self.open_or_create_daily_note_for_date(target_date);
                                                     }
                                                 },
                                             );
@@ -3748,22 +4689,70 @@ impl eframe::App for WidgetApp {
             }
         }
 
+        // Tag Rename Dialog
+        if self.tag_rename_dialog_open {
+            let center_pos = ui_style::screen_rect(&ctx).center();
+            egui::Window::new("Rename Tag across Vault")
+                .id(egui::Id::new("tag_rename_modal"))
+                .collapsible(false)
+                .resizable(false)
+                .pivot(egui::Align2::CENTER_CENTER)
+                .default_pos(center_pos)
+                .show(&ctx, |ui| {
+                    ui.label(format!("Old tag: #{}", self.tag_to_rename));
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label("New tag:");
+                        ui.text_edit_singleline(&mut self.tag_new_name_buffer);
+                    });
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Rename Tag").clicked() {
+                            let modified_note_ids = tags::rename_tag_in_vault(
+                                &mut self.data.notes,
+                                &self.tag_to_rename,
+                                &self.tag_new_name_buffer,
+                            );
+                            let count = modified_note_ids.len();
+                            self.dirty_note_ids.extend(modified_note_ids);
+                            self.tag_index = TagIndex::build(&self.data.notes);
+                            self.link_index =
+                                LinkIndex::build(&self.data.notes, &self.storage_paths.notes_dir);
+                            self.storage_message = Some(format!("Renamed tag in {count} note(s)"));
+                            self.flush_dirty_notes();
+                            self.tag_rename_dialog_open = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.tag_rename_dialog_open = false;
+                        }
+                    });
+                });
+        }
+
         // Modal Command Palette
-        if let Some(action) = commands::show_command_palette(&ctx, &mut self.command_palette_state)
-        {
-            self.handle_command_action(action);
+        if let Some(result) = commands::show_command_palette(
+            &ctx,
+            &mut self.command_palette_state,
+            &self.settings.recent_commands,
+            &self.settings.recent_note_ids,
+            &self.data.notes,
+            &self.storage_paths.notes_dir,
+        ) {
+            match result {
+                CommandPaletteResult::Action(action) => self.handle_command_action(action),
+                CommandPaletteResult::OpenNote(id) => {
+                    self.open_note(id);
+                    self.activate_view(AppView::Editor);
+                }
+            }
         }
 
         // Modal Quick Capture
-        let capture_target_label = match self.settings.quick_capture_target {
-            QuickCaptureTarget::DailyNote => "Today's Daily Note",
-            QuickCaptureTarget::Inbox => "Inbox.md",
-            QuickCaptureTarget::NewNote => "New Note",
-        };
         if let Some(submission) = quick_capture::show_quick_capture(
             &ctx,
             &mut self.quick_capture_state,
-            capture_target_label,
+            &self.settings.quick_capture_target,
+            &self.settings.quick_capture_custom_note,
         ) {
             self.apply_quick_capture(submission);
         }

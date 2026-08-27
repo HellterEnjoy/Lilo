@@ -338,6 +338,111 @@ fn is_escaped(source: &str, marker_start: usize) -> bool {
         == 1
 }
 
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnresolvedLinkEntry {
+    pub target: String,
+    pub referencing_notes: Vec<(Uuid, String)>,
+}
+
+/// Collects all unresolved wiki-links across all notes in the vault.
+#[allow(dead_code)]
+pub fn collect_all_unresolved_links(
+    notes: &[Note],
+    link_index: &LinkIndex,
+) -> Vec<UnresolvedLinkEntry> {
+    let mut map: HashMap<String, Vec<(Uuid, String)>> = HashMap::new();
+
+    for note in notes {
+        if let Some(links) = link_index.links_for(note.id) {
+            for target in &links.unresolved {
+                let entry = map.entry(target.clone()).or_default();
+                if !entry.iter().any(|(id, _)| *id == note.id) {
+                    entry.push((note.id, note.title.clone()));
+                }
+            }
+        }
+    }
+
+    let mut result: Vec<UnresolvedLinkEntry> = map
+        .into_iter()
+        .map(|(target, referencing_notes)| UnresolvedLinkEntry {
+            target,
+            referencing_notes,
+        })
+        .collect();
+
+    result.sort_by(|a, b| a.target.cmp(&b.target));
+    result
+}
+
+/// Replaces references to an old note title with a new title across all notes in the vault.
+/// Handles `[[old_title]]`, `[[old_title|alias]]`, `[[old_title#heading]]`, `[[old_title#heading|alias]]`, and `[[folder/old_title]]`.
+/// Returns every modified note so the caller can persist all changed files.
+pub fn rename_note_references(notes: &mut [Note], old_title: &str, new_title: &str) -> Vec<Uuid> {
+    let clean_old = old_title.trim().trim_end_matches(".md");
+    let clean_new = new_title.trim().trim_end_matches(".md");
+    if clean_old.is_empty() || clean_new.is_empty() || clean_old == clean_new {
+        return Vec::new();
+    }
+
+    let mut modified_note_ids = Vec::new();
+
+    for note in notes.iter_mut() {
+        let links = extract_wiki_links(&note.content);
+        if links.is_empty() {
+            continue;
+        }
+
+        let mut replaced_content = String::with_capacity(note.content.len());
+        let mut last_idx = 0;
+        let mut changed = false;
+
+        for link in links {
+            let matches_target = link.target.eq_ignore_ascii_case(clean_old)
+                || link.target.ends_with(&format!("/{clean_old}"))
+                || link.target.ends_with(&format!("\\{clean_old}"));
+
+            if matches_target {
+                replaced_content.push_str(&note.content[last_idx..link.source_range.start]);
+
+                // Construct new link target preserving directory prefix if present
+                let new_target = if let Some((parent, _)) = link.target.rsplit_once('/') {
+                    format!("{parent}/{clean_new}")
+                } else if let Some((parent, _)) = link.target.rsplit_once('\\') {
+                    format!("{parent}\\{clean_new}")
+                } else {
+                    clean_new.to_string()
+                };
+
+                let mut new_link_inner = new_target;
+                if let Some(heading) = &link.heading {
+                    new_link_inner.push('#');
+                    new_link_inner.push_str(heading);
+                }
+                if let Some(label) = &link.label {
+                    new_link_inner.push('|');
+                    new_link_inner.push_str(label);
+                }
+
+                replaced_content.push_str(&format!("[[{new_link_inner}]]"));
+                last_idx = link.source_range.end;
+                changed = true;
+            }
+        }
+
+        if changed {
+            replaced_content.push_str(&note.content[last_idx..]);
+            note.content = replaced_content;
+            note.mark_as_updated();
+            note.refresh_search_text();
+            modified_note_ids.push(note.id);
+        }
+    }
+
+    modified_note_ids
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -462,5 +567,40 @@ mod tests {
         );
         assert_eq!(split_target_path("../Outside"), None);
         assert_eq!(split_target_path("Folder//Note"), None);
+    }
+
+    #[test]
+    fn renames_note_references_preserving_headings_and_aliases() {
+        let note1 = note(
+            "Caller",
+            &[],
+            "See [[Old Note]], [[Old Note#Heading]], [[Old Note|Custom Alias]], and [[Folder/Old Note#Sub|Label]].",
+        );
+        let mut notes = vec![note1];
+
+        let modified = rename_note_references(&mut notes, "Old Note", "New Name");
+        assert_eq!(modified, vec![notes[0].id]);
+        assert_eq!(
+            notes[0].content,
+            "See [[New Name]], [[New Name#Heading]], [[New Name|Custom Alias]], and [[Folder/New Name#Sub|Label]]."
+        );
+    }
+
+    #[test]
+    fn collects_unresolved_links_across_vault() {
+        let note1 = note(
+            "Alpha",
+            &[],
+            "Links to [[Dead Link]] and [[Missing Target]].",
+        );
+        let note2 = note("Beta", &[], "Also links to [[Dead Link]].");
+        let index = LinkIndex::build(&[note1.clone(), note2.clone()], Path::new(""));
+
+        let unresolved = collect_all_unresolved_links(&[note1, note2], &index);
+        assert_eq!(unresolved.len(), 2);
+        assert_eq!(unresolved[0].target, "Dead Link");
+        assert_eq!(unresolved[0].referencing_notes.len(), 2);
+        assert_eq!(unresolved[1].target, "Missing Target");
+        assert_eq!(unresolved[1].referencing_notes.len(), 1);
     }
 }
