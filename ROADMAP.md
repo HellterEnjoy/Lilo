@@ -150,37 +150,52 @@ Templates remain declarative and attachments remain ordinary files. Neither syst
 
 **Platform acceptance:** the complete note, tag, search, attachment and navigation model is shared by Windows and Linux. The system-wide capture shortcut is explicitly Windows-only in this release; the ordinary in-app shortcut works on both supported platforms.
 
-## 0.2.1 — Vault safety and migration
+## 0.2.1 — Transparent analytics and compact responsiveness ✅
 
-**Status:** planned from real `0.2.0` feedback.
+**User value:** users can explicitly choose whether to share a very small set of aggregate feature counters, inspect exactly what is collected and revoke consent without giving up the local-first workflow.
+
+- add first-run opt-in consent and a permanent Privacy & Analytics settings section;
+- restrict payloads to a public whitelist of daily numeric counters and exclude note data, user-entered text, paths and device identifiers;
+- add deletion of an installation's stored analytics rows when analytics is disabled;
+- publish the Cloudflare Worker, D1 schema, retention policy and complete privacy notice;
+- archive GitHub repository traffic separately from desktop application analytics;
+- add configurable autosave while preserving manual save and save-on-exit;
+- defer expensive link and tag index updates until typing pauses;
+- improve editor wrapping, navigation controls and dialogs at compact window sizes.
+
+Application analytics remain disabled until consent is granted. GitHub traffic statistics contain no Lilo installation identifier and are documented as a separate source.
+
+## 0.2.2 — Vault safety and migration
+
+**Status:** planned from real `0.2.x` feedback.
 
 **User value:** bulk changes and upgrades remain predictable even when files are unusual, externally edited or partially inaccessible.
 
 - add a reviewed preview before a vault-wide tag or link rewrite;
 - make partial write failures visible without hiding which files were saved;
 - extend recovery diagnostics to missing and malformed attachment links;
-- test upgrades from representative `0.1.x` vaults and settings files;
+- test upgrades from representative `0.1.x` and early `0.2.x` vaults and settings files;
 - test interrupted bulk operations and read-only files;
 - clarify which recovery actions use Backups and which use Trash.
 
 **Ready when:** every multi-file operation explains its scope, preserves recoverable input and reports partial failure accurately.
 
-## 0.2.2 — Large-vault performance
+## 0.2.3 — Large-vault performance
 
 **Status:** planned; implementation depends on measured bottlenecks.
 
 **User value:** Lilo remains responsive when a personal vault grows from dozens to thousands of notes.
 
 - benchmark startup, search, tag indexing and link indexing with 1,000 and 10,000 notes;
-- avoid rebuilding vault-wide indexes when one note changes if profiling shows meaningful cost;
+- extend incremental index updates where profiling shows meaningful cost;
 - bound decoded-image memory and release unused image resources;
 - profile graph layout and interaction on dense vaults;
 - keep editor highlighting and command matching responsive for unusually large notes;
 - document repeatable performance fixtures and acceptable limits.
 
-**Ready when:** published performance measurements identify the remaining limits and ordinary editing does not stall behind avoidable vault-wide work.
+**Ready when:** published measurements identify the remaining limits and ordinary editing does not stall behind avoidable vault-wide work.
 
-## 0.2.3 — Platform integration and distribution
+## 0.2.4 — Platform integration and distribution
 
 **Status:** planned; features may differ where Windows, X11 and Wayland provide different capabilities.
 
@@ -196,38 +211,22 @@ Templates remain declarative and attachments remain ordinary files. Neither syst
 
 **Ready when:** installation, shortcuts, startup and removal are predictable on every advertised platform, and unsupported integration is clearly identified in the UI.
 
-## 0.2.4 — Workflow polish
+## 0.2.5 — Workflow polish and feedback-driven consolidation
 
-**Status:** planned after reliability and performance work.
+**Status:** intentionally guided by real use rather than a speculative feature list.
 
 **User value:** the existing feature set becomes easier to discover and operate without making the compact window crowded.
 
-- complete a keyboard-focus and screen-reader pass for dialogs and overlays;
-- improve first-run and empty-vault guidance;
-- make destructive confirmations and status messages consistent;
-- reduce duplicated controls by routing actions through the command registry;
-- improve compact layouts at minimum supported sizes;
-- refine Explorer and Inspector information hierarchy from user feedback.
-
-Arbitrary CSS-like skinning and per-screen theme overrides remain out of scope.
-
-**Ready when:** a new user can discover capture, search, recovery and navigation without consulting source code or fighting keyboard focus.
-
-## 0.2.5 — Feedback-driven consolidation
-
-**Status:** intentionally not feature-filled in advance.
-
-**User value:** the last planned `0.2.x` milestone addresses demonstrated problems instead of adding speculative surface area.
-
 - prioritise reproducible bugs and repeated workflow requests from Issues and Discussions;
-- simplify or remove interactions that users consistently misunderstand;
-- finish accessibility, documentation and packaging gaps found in `0.2.x`;
-- decide the `0.3.x` direction from actual usage: capture speed, knowledge navigation or portable-vault workflow;
-- publish explicit non-goals before beginning another large feature cycle.
+- complete a keyboard-focus and screen-reader pass for dialogs and overlays;
+- improve first-run, empty-vault and destructive-action guidance;
+- reduce duplicated controls by routing actions through the command registry;
+- refine Explorer and Inspector information hierarchy from user feedback;
+- decide the `0.3.x` direction from actual usage and publish explicit non-goals.
 
-Plugins, arbitrary scripts and an extension marketplace are not promised for `0.2.x`.
+Arbitrary CSS-like skinning, plugins, native scripts and an extension marketplace are not promised for `0.2.x`.
 
-**Ready when:** the project has a documented, evidence-based direction for `0.3.x` and no known blocking data-safety regression remains in the `0.2.x` line.
+**Ready when:** a new user can discover the core workflow without fighting the interface, no known blocking data-safety regression remains, and the project has an evidence-based direction for `0.3.x`.
 
 ## Beyond 0.2.5
 

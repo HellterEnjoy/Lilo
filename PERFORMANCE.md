@@ -9,7 +9,9 @@ Lilo keeps the compact interface responsive with bounded work rather than loadin
 - Search uses a pre-normalised per-note text field.
 - External file checks run on a two-second interval instead of every frame.
 - Graph rendering has a user-adjustable 10–200 node limit and deterministic positions, so unrelated notes do not reshuffle existing nodes.
-- Saving is debounced, while explicit save and application exit still flush pending changes.
+- Autosave writes only dirty notes at the configured 15-second to 10-minute interval; explicit save and application exit still flush pending changes.
+- Multi-note saves refresh the vault snapshot once after the batch instead of rescanning after every note.
+- Link and tag indexes refresh after a short typing pause instead of rebuilding on every keystroke.
 
 ## Automated workloads
 

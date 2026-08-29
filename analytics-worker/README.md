@@ -3,6 +3,14 @@
 This Worker accepts opt-in daily aggregate counters from Lilo and protected
 repository-traffic snapshots from GitHub Actions. The D1 binding is named `DB`.
 
+The public deployment currently used by official Lilo builds is
+`https://lilo-analytics.miaccu23.workers.dev`. Its routes are:
+
+- `GET /health` — service availability only;
+- `POST /v1/daily` — validated opt-in desktop aggregates;
+- `DELETE /v1/data` — deletion by installation identifier;
+- `POST /v1/github-traffic` — token-protected repository traffic ingestion.
+
 ## Deploy
 
 1. Apply `migrations/0001_schema.sql` to the remote `database_lilo` database.
@@ -20,4 +28,5 @@ Never commit either token. The public desktop endpoint and D1 identifiers in
 
 The application endpoint accepts only the public feature whitelist. The GitHub
 traffic endpoint additionally requires the Worker secret. There is no public
-endpoint for reading D1 data.
+endpoint for reading D1 data. Data handling and user controls are documented in
+the repository's [`PRIVACY.md`](../PRIVACY.md).

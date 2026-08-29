@@ -4,7 +4,7 @@ Thank you for your interest in Lilo. Lilo is intentionally maintained as a singl
 
 ## Issues and suggestions
 
-You are welcome to open Issues for:
+You are welcome to open [GitHub Issues](https://github.com/HellterEnjoy/Lilo/issues) for:
 
 - bug reports;
 - feature requests;

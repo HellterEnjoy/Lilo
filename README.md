@@ -15,8 +15,11 @@ It stays compact when you need a quick thought and expands into a complete writi
 [![Windows](https://img.shields.io/badge/Windows-x86--64-0078d4?style=for-the-badge&logo=windows11&logoColor=white)](#install-lilo)
 [![Linux](https://img.shields.io/badge/Linux-x86--64-fcc624?style=for-the-badge&logo=linux&logoColor=black)](#install-lilo)
 [![License](https://img.shields.io/badge/license-PolyForm_NC-70517c?style=for-the-badge)](LICENSE)
+[![Star Lilo](https://img.shields.io/github/stars/HellterEnjoy/Lilo?style=for-the-badge&logo=github&color=f2cc60&label=star%20Lilo)](https://github.com/HellterEnjoy/Lilo/stargazers)
 
 [**Download Lilo**](https://github.com/HellterEnjoy/Lilo/releases/latest) · [Features](#everything-you-need-without-leaving-the-widget) · [Build from source](#build-from-source) · [Privacy](PRIVACY.md) · [Roadmap](ROADMAP.md)
+
+If Lilo is useful to you, [**give the repository a star**](https://github.com/HellterEnjoy/Lilo) — it helps other people discover the project.
 
 <br />
 
@@ -113,7 +116,7 @@ Quick Capture adds a timestamped entry without making you switch away from the n
 - a new timestamped note;
 - a selected custom note.
 
-On Windows, the configurable global shortcut can bring Lilo forward and open Quick Capture even when another application is focused. Linux keeps the in-app shortcut; a system-wide Linux implementation is not included in `0.2.0`.
+On Windows, the configurable global shortcut can bring Lilo forward and open Quick Capture even when another application is focused. Linux keeps the in-app shortcut; a system-wide Linux implementation is not included in `0.2.1`.
 
 ## Templates without lock-in
 
@@ -267,7 +270,7 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-On Windows, [Inno Setup 6](https://jrsoftware.org/isinfo.php) and `scripts/package-windows.ps1` produce the installer, portable ZIP and SHA-256 files.
+Official Windows release artifacts are built from the version tag on a clean GitHub Actions runner. For local packaging, [Inno Setup 6](https://jrsoftware.org/isinfo.php) and `scripts/package-windows.ps1` produce the same installer, portable ZIP and SHA-256 files.
 
 ## Platform status
 
@@ -282,7 +285,7 @@ Windows and Ubuntu run formatting, tests and Clippy in CI. Linux releases are cu
 
 ## Project status
 
-Version `v0.2.1` adds explicit opt-in usage analytics with a public event whitelist, in-app deletion and a separate GitHub traffic archive. Lilo does not yet provide automatic updates, code signing, native Linux packages, a system-wide Linux capture hotkey or an official macOS build. Graph density and expensive live highlighting remain intentionally bounded to keep the widget responsive.
+Version `v0.2.1` adds explicit opt-in usage analytics with a public event whitelist, in-app deletion and a separate GitHub traffic archive. It also improves compact-window layout, adds configurable autosave and defers expensive link and tag index refreshes while typing. Lilo does not yet provide automatic updates, code signing, native Linux packages, a system-wide Linux capture hotkey or an official macOS build.
 
 - [Roadmap](ROADMAP.md) — planned product direction;
 - [Changelog](CHANGELOG.md) — implemented release history;

@@ -1,9 +1,14 @@
 # Changelog
 
-## 0.2.1 — Transparent Analytics
+## 0.2.1 — Transparent Analytics and Responsiveness
+
+> [!WARNING]
+> Lilo remains under active development. This release is checked on Windows, Arch Linux and Ubuntu, but bugs and platform-specific problems may remain. Keep a current vault backup and report reproducible issues on GitHub.
 
 - added explicit first-run consent for optional, privacy-preserving usage analytics;
 - added configurable note autosave with an on/off control and intervals from 15 seconds to 10 minutes, while preserving Ctrl+S and save-on-exit;
+- avoided redundant disk snapshots during multi-note saves and deferred link and tag index refreshes while the user is actively typing;
+- improved editor wrapping, daily navigation, formatting controls and analytics dialogs in compact windows;
 - added a Settings control that disables analytics and queues deletion of previously collected installation rows;
 - restricted usage reporting to a public whitelist of aggregate daily feature counters;
 - kept note contents, titles, paths, tags, search queries and device information out of analytics payloads;

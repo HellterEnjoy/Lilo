@@ -53,6 +53,13 @@ deliver the HTTPS request. Lilo's Worker does not insert the request IP address
 or other network headers into D1 and does not log request bodies in application
 code.
 
+The configured service is `https://lilo-analytics.miaccu23.workers.dev`.
+Its desktop routes accept a daily aggregate report and an installation-data
+deletion request; it has no public analytics read endpoint. The complete
+desktop client, Worker implementation and database schema are available in
+[`src/analytics.rs`](src/analytics.rs) and
+[`analytics-worker/`](analytics-worker/).
+
 Rows containing installation identifiers are retained for no longer than 90
 days. Disabling analytics queues deletion of all rows associated with that
 installation identifier and retries automatically if the device is offline.
@@ -69,5 +76,5 @@ installation identifier or note data.
 The exact analytics fields and whitelist are visible inside Lilo. The user can
 disable analytics and request deletion directly from the application without
 providing a name or email address. General privacy questions can be opened in
-the project's GitHub Issues; installation identifiers or other private details
-should never be posted in a public issue.
+[GitHub Issues](https://github.com/HellterEnjoy/Lilo/issues); installation
+identifiers or other private details should never be posted in a public issue.

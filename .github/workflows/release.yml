@@ -91,12 +91,12 @@ jobs:
           }
 
       - name: Download WinGetCreate
-        if: ${{ env.WINGET_GITHUB_TOKEN != '' && (github.event_name == 'push' || inputs.publish_winget) }}
+        if: ${{ env.WINGET_GITHUB_TOKEN != '' && github.event_name == 'workflow_dispatch' && inputs.publish_winget }}
         shell: pwsh
         run: Invoke-WebRequest 'https://aka.ms/wingetcreate/latest' -OutFile "$env:RUNNER_TEMP\wingetcreate.exe"
 
       - name: Submit WinGet update
-        if: ${{ env.WINGET_GITHUB_TOKEN != '' && (github.event_name == 'push' || inputs.publish_winget) }}
+        if: ${{ env.WINGET_GITHUB_TOKEN != '' && github.event_name == 'workflow_dispatch' && inputs.publish_winget }}
         shell: pwsh
         run: |
           $version = '${{ steps.version.outputs.version }}'
@@ -116,6 +116,6 @@ jobs:
           }
 
       - name: Explain skipped WinGet submission
-        if: ${{ env.WINGET_GITHUB_TOKEN == '' && (github.event_name == 'push' || inputs.publish_winget) }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_winget && env.WINGET_GITHUB_TOKEN == '' }}
         shell: pwsh
         run: Write-Warning 'WINGET_GITHUB_TOKEN is not configured; release assets were published, but WinGet was not updated.'
