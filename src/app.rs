@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 const EXTERNAL_SYNC_INTERVAL: Duration = Duration::from_secs(2);
+const INDEX_REFRESH_DEBOUNCE: Duration = Duration::from_millis(350);
 const ANALYTICS_INITIAL_DELAY: Duration = Duration::from_secs(10);
 const ANALYTICS_UPDATE_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const AUTOSAVE_INTERVAL_OPTIONS: [u64; 6] = [15, 30, 60, 120, 300, 600];
@@ -38,6 +39,8 @@ pub(crate) struct WidgetApp {
     dirty_note_ids: HashSet<Uuid>,
     pending_title_rename_ids: HashSet<Uuid>,
     dirty_since: Option<Instant>,
+    pending_index_note_ids: HashSet<Uuid>,
+    last_index_change: Option<Instant>,
     storage_message: Option<String>,
     link_index: LinkIndex,
     tag_index: TagIndex,
@@ -436,6 +439,8 @@ impl WidgetApp {
             dirty_note_ids: HashSet::new(),
             pending_title_rename_ids: HashSet::new(),
             dirty_since: None,
+            pending_index_note_ids: HashSet::new(),
+            last_index_change: None,
             storage_message: None,
             link_index,
             tag_index,
@@ -808,7 +813,7 @@ impl WidgetApp {
         }
     }
 
-    fn save_note_now(&mut self, id: Uuid) -> bool {
+    fn save_note_to_disk(&mut self, id: Uuid) -> bool {
         let result = self
             .data
             .notes
@@ -827,17 +832,26 @@ impl WidgetApp {
             });
 
         match result {
-            Some(Ok(())) => {
-                self.vault_snapshot =
-                    storage::vault_snapshot(&self.storage_paths.notes_dir).unwrap_or_default();
-                true
-            }
+            Some(Ok(())) => true,
             Some(Err(error)) => {
                 self.storage_message = Some(format!("Failed to save note: {error}"));
                 false
             }
             None => false,
         }
+    }
+
+    fn save_note_now(&mut self, id: Uuid) -> bool {
+        let saved = self.save_note_to_disk(id);
+        if saved {
+            self.refresh_vault_snapshot();
+        }
+        saved
+    }
+
+    fn refresh_vault_snapshot(&mut self) {
+        self.vault_snapshot =
+            storage::vault_snapshot(&self.storage_paths.notes_dir).unwrap_or_default();
     }
 
     fn mark_note_dirty(&mut self, id: Uuid) {
@@ -847,8 +861,10 @@ impl WidgetApp {
 
     fn flush_dirty_notes(&mut self) {
         let ids: Vec<Uuid> = self.dirty_note_ids.iter().copied().collect();
+        let mut disk_changed = false;
         for id in ids {
-            if self.save_note_now(id) {
+            if self.save_note_to_disk(id) {
+                disk_changed = true;
                 if self.pending_title_rename_ids.remove(&id) {
                     let rename_result = self
                         .data
@@ -858,18 +874,46 @@ impl WidgetApp {
                         .map(storage::rename_note_file);
                     if let Some(Err(error)) = rename_result {
                         self.storage_message = Some(format!("Failed to rename note file: {error}"));
-                    } else {
-                        self.vault_snapshot =
-                            storage::vault_snapshot(&self.storage_paths.notes_dir)
-                                .unwrap_or_default();
                     }
                 }
                 self.dirty_note_ids.remove(&id);
             }
         }
 
+        if disk_changed {
+            self.refresh_vault_snapshot();
+        }
+
         self.dirty_since = (!self.dirty_note_ids.is_empty()).then(Instant::now);
         self.save_settings();
+    }
+
+    fn schedule_note_index_refresh(&mut self, id: Uuid) {
+        self.pending_index_note_ids.insert(id);
+        self.last_index_change = Some(Instant::now());
+    }
+
+    fn flush_pending_index_refresh(&mut self) {
+        let note_ids = std::mem::take(&mut self.pending_index_note_ids);
+        for id in note_ids {
+            if let Some(note) = self.data.notes.iter().find(|note| note.id == id) {
+                self.link_index.refresh_note_content(note);
+            }
+        }
+        self.tag_index = TagIndex::build(&self.data.notes);
+        self.last_index_change = None;
+    }
+
+    fn process_deferred_index_refresh(&mut self, ctx: &egui::Context) {
+        let Some(last_change) = self.last_index_change else {
+            return;
+        };
+        let elapsed = last_change.elapsed();
+        if elapsed >= INDEX_REFRESH_DEBOUNCE {
+            self.flush_pending_index_refresh();
+        } else {
+            ctx.request_repaint_after(INDEX_REFRESH_DEBOUNCE - elapsed);
+        }
     }
 
     fn process_autosave(&mut self, ctx: &egui::Context) {
@@ -1421,6 +1465,9 @@ impl WidgetApp {
                 }
                 self.folder_paths = folders;
                 self.link_index = LinkIndex::build(&self.data.notes, &self.storage_paths.notes_dir);
+                self.tag_index = TagIndex::build(&self.data.notes);
+                self.pending_index_note_ids.clear();
+                self.last_index_change = None;
                 self.vault_snapshot =
                     storage::vault_snapshot(&self.storage_paths.notes_dir).unwrap_or_default();
                 self.storage_message = warnings
@@ -4412,21 +4459,13 @@ impl eframe::App for WidgetApp {
                                                             let is_today = LocalDateService::is_today(current_date);
                                                             let display_date_str = LocalDateService::format_daily_display(current_date);
 
-                                                            ui.horizontal(|ui| {
-                                                                if ui
-                                                                    .button("← Prev Day")
-                                                                    .on_hover_text(format!("Open daily note for {}", prev_date.format("%Y-%m-%d")))
-                                                                    .clicked()
-                                                                {
-                                                                    daily_nav_target = Some(prev_date);
-                                                                }
-
+                                                            let compact_navigation = ui.available_width() < 440.0;
+                                                            let date_label = |ui: &mut egui::Ui| {
                                                                 ui.label(
                                                                     egui::RichText::new(format!("📅 {display_date_str}"))
                                                                         .strong()
                                                                         .color(ui.visuals().hyperlink_color),
                                                                 );
-
                                                                 if is_today {
                                                                     ui.label(
                                                                         egui::RichText::new("[Today]")
@@ -4434,22 +4473,62 @@ impl eframe::App for WidgetApp {
                                                                             .strong()
                                                                             .color(ui.visuals().selection.bg_fill),
                                                                     );
-                                                                } else if ui
-                                                                    .button("Today")
-                                                                    .on_hover_text("Jump to today's daily note")
-                                                                    .clicked()
-                                                                {
-                                                                    daily_nav_target = Some(LocalDateService::today());
                                                                 }
+                                                            };
 
-                                                                if ui
-                                                                    .button("Next Day →")
-                                                                    .on_hover_text(format!("Open daily note for {}", next_date.format("%Y-%m-%d")))
-                                                                    .clicked()
-                                                                {
-                                                                    daily_nav_target = Some(next_date);
-                                                                }
-                                                            });
+                                                            if compact_navigation {
+                                                                ui.horizontal_wrapped(date_label);
+                                                                ui.horizontal_wrapped(|ui| {
+                                                                    if ui
+                                                                        .button("← Prev")
+                                                                        .on_hover_text(format!("Open daily note for {}", prev_date.format("%Y-%m-%d")))
+                                                                        .clicked()
+                                                                    {
+                                                                        daily_nav_target = Some(prev_date);
+                                                                    }
+                                                                    if !is_today
+                                                                        && ui
+                                                                            .button("Today")
+                                                                            .on_hover_text("Jump to today's daily note")
+                                                                            .clicked()
+                                                                    {
+                                                                        daily_nav_target = Some(LocalDateService::today());
+                                                                    }
+                                                                    if ui
+                                                                        .button("Next →")
+                                                                        .on_hover_text(format!("Open daily note for {}", next_date.format("%Y-%m-%d")))
+                                                                        .clicked()
+                                                                    {
+                                                                        daily_nav_target = Some(next_date);
+                                                                    }
+                                                                });
+                                                            } else {
+                                                                ui.horizontal(|ui| {
+                                                                    if ui
+                                                                        .button("← Prev Day")
+                                                                        .on_hover_text(format!("Open daily note for {}", prev_date.format("%Y-%m-%d")))
+                                                                        .clicked()
+                                                                    {
+                                                                        daily_nav_target = Some(prev_date);
+                                                                    }
+                                                                    date_label(ui);
+                                                                    if !is_today
+                                                                        && ui
+                                                                            .button("Today")
+                                                                            .on_hover_text("Jump to today's daily note")
+                                                                            .clicked()
+                                                                    {
+                                                                        daily_nav_target = Some(LocalDateService::today());
+                                                                    }
+                                                                    if ui
+                                                                        .button("Next Day →")
+                                                                        .on_hover_text(format!("Open daily note for {}", next_date.format("%Y-%m-%d")))
+                                                                        .clicked()
+                                                                    {
+                                                                        daily_nav_target = Some(next_date);
+                                                                    }
+                                                                });
+                                                            }
                                                             ui.add_space(6.0);
                                                         }
 
@@ -4489,14 +4568,7 @@ impl eframe::App for WidgetApp {
                                                             }
                                                         }
 
-                                                        let mut command_changed = markdown_command.is_some_and(|command| {
-                                                            markdown::apply_command(
-                                                                ui.ctx(),
-                                                                editor_id,
-                                                                &mut note.content,
-                                                                command,
-                                                            )
-                                                        });
+                                                        let mut command_changed = false;
 
                                                         if editor_focused
                                                             && ui.input(|input| {
@@ -4512,12 +4584,6 @@ impl eframe::App for WidgetApp {
                                                                 input.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
                                                             });
                                                             command_changed = true;
-                                                        }
-
-                                                        if command_changed {
-                                                            analytics_events.push(
-                                                                AnalyticsFeature::MarkdownFormattingUsed,
-                                                            );
                                                         }
 
                                                         // Drag & Drop Attachment Files
@@ -4572,9 +4638,14 @@ impl eframe::App for WidgetApp {
                                                         });
 
                                                         // Formatting & Quick Tools toolbar
-                                                        ui.horizontal(|ui| {
+                                                        let compact_tools = ui.available_width() < 440.0;
+                                                        ui.horizontal_wrapped(|ui| {
                                                             if ui
-                                                                .small_button("📷 Paste Image")
+                                                                .small_button(if compact_tools {
+                                                                    "📷 Paste"
+                                                                } else {
+                                                                    "📷 Paste Image"
+                                                                })
                                                                 .on_hover_text("Paste screenshot or image from clipboard (Ctrl+V)")
                                                                 .clicked()
                                                             {
@@ -4586,17 +4657,48 @@ impl eframe::App for WidgetApp {
                                                             if ui.small_button("I").on_hover_text("Italic (Ctrl+I)").clicked() {
                                                                 markdown_command = Some(markdown::MarkdownCommand::Italic);
                                                             }
-                                                            if ui.small_button("`code`").on_hover_text("Inline Code").clicked() {
-                                                                markdown_command = Some(markdown::MarkdownCommand::InlineCode);
-                                                            }
-                                                            if ui.small_button("[[link]]").on_hover_text("Wiki-Link").clicked() {
-                                                                markdown_command = Some(markdown::MarkdownCommand::WikiLink);
-                                                            }
-                                                            if ui.small_button("☑ Task").on_hover_text("Task checkbox").clicked() {
-                                                                markdown_command = Some(markdown::MarkdownCommand::Task);
+                                                            if compact_tools {
+                                                                ui.menu_button("More ⋯", |ui| {
+                                                                    if ui.button("`code`  Inline code").clicked() {
+                                                                        markdown_command = Some(markdown::MarkdownCommand::InlineCode);
+                                                                        ui.close();
+                                                                    }
+                                                                    if ui.button("[[link]]  Wiki-link").clicked() {
+                                                                        markdown_command = Some(markdown::MarkdownCommand::WikiLink);
+                                                                        ui.close();
+                                                                    }
+                                                                    if ui.button("☑  Task checkbox").clicked() {
+                                                                        markdown_command = Some(markdown::MarkdownCommand::Task);
+                                                                        ui.close();
+                                                                    }
+                                                                });
+                                                            } else {
+                                                                if ui.small_button("`code`").on_hover_text("Inline Code").clicked() {
+                                                                    markdown_command = Some(markdown::MarkdownCommand::InlineCode);
+                                                                }
+                                                                if ui.small_button("[[link]]").on_hover_text("Wiki-Link").clicked() {
+                                                                    markdown_command = Some(markdown::MarkdownCommand::WikiLink);
+                                                                }
+                                                                if ui.small_button("☑ Task").on_hover_text("Task checkbox").clicked() {
+                                                                    markdown_command = Some(markdown::MarkdownCommand::Task);
+                                                                }
                                                             }
                                                         });
                                                         ui.add_space(4.0);
+
+                                                        if markdown_command.is_some_and(|command| {
+                                                            markdown::apply_command(
+                                                                ui.ctx(),
+                                                                editor_id,
+                                                                &mut note.content,
+                                                                command,
+                                                            )
+                                                        }) {
+                                                            command_changed = true;
+                                                            analytics_events.push(
+                                                                AnalyticsFeature::MarkdownFormattingUsed,
+                                                            );
+                                                        }
 
                                                         if trigger_paste_image {
                                                             match crate::attachments::AttachmentManager::try_save_clipboard_image(
@@ -4827,12 +4929,10 @@ impl eframe::App for WidgetApp {
                                                                 &self.storage_paths.notes_dir,
                                                             );
                                                             self.tag_index = TagIndex::build(&self.data.notes);
-                                                        } else if note_content_changed
-                                                            && let Some(note) =
-                                                                self.data.notes.iter().find(|note| note.id == id)
-                                                        {
-                                                            self.link_index.refresh_note_content(note);
-                                                            self.tag_index = TagIndex::build(&self.data.notes);
+                                                            self.pending_index_note_ids.clear();
+                                                            self.last_index_change = None;
+                                                        } else if note_content_changed {
+                                                            self.schedule_note_index_refresh(id);
                                                         }
                                                         self.mark_note_dirty(id);
                                                     }
@@ -5142,6 +5242,7 @@ impl eframe::App for WidgetApp {
             self.analytics_details_open = open;
         }
 
+        self.process_deferred_index_refresh(&ctx);
         self.process_autosave(&ctx);
         self.sync_external_changes(&ctx);
         self.process_analytics(&ctx);
