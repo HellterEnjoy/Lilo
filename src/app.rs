@@ -612,20 +612,27 @@ impl WidgetApp {
         }
 
         let mut choice = None;
-        let center = ui_style::screen_rect(ctx).center();
+        let screen_rect = ui_style::screen_rect(ctx);
+        let center = screen_rect.center();
+        let modal_width = (screen_rect.width() - 48.0).clamp(232.0, 440.0);
+        let details_height = (screen_rect.height() - 220.0).clamp(90.0, 260.0);
         egui::Window::new("Help improve Lilo?")
             .id(egui::Id::new("analytics_consent"))
             .collapsible(false)
             .resizable(false)
+            .constrain_to(screen_rect)
             .pivot(egui::Align2::CENTER_CENTER)
             .default_pos(center)
             .show(ctx, |ui| {
-                ui.set_max_width(480.0);
+                ui.set_width(modal_width);
                 ui.label("With your permission, Lilo can send privacy-preserving usage analytics to help prioritise improvements.");
                 ui.add_space(6.0);
-                Self::show_analytics_data_description(ui);
+                egui::ScrollArea::vertical()
+                    .id_salt("analytics_consent_details")
+                    .max_height(details_height)
+                    .show(ui, Self::show_analytics_data_description);
                 ui.add_space(10.0);
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if ui.button("Allow analytics").clicked() {
                         choice = Some(true);
                     }
@@ -5059,13 +5066,23 @@ impl eframe::App for WidgetApp {
         self.show_analytics_consent(&ctx);
         if self.analytics_details_open {
             let mut open = true;
+            let screen_rect = ui_style::screen_rect(&ctx);
+            let details_size = egui::vec2(
+                (screen_rect.width() - 32.0).clamp(248.0, 520.0),
+                (screen_rect.height() - 48.0).clamp(152.0, 320.0),
+            );
             egui::Window::new("Analytics data")
                 .id(egui::Id::new("analytics_data_details"))
                 .open(&mut open)
                 .collapsible(false)
                 .resizable(true)
-                .default_size(egui::vec2(520.0, 320.0))
-                .show(&ctx, Self::show_analytics_data_description);
+                .constrain_to(screen_rect)
+                .default_size(details_size)
+                .show(&ctx, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("analytics_data_details_scroll")
+                        .show(ui, Self::show_analytics_data_description);
+                });
             self.analytics_details_open = open;
         }
 
