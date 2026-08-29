@@ -39,7 +39,8 @@ struct CachedLayout {
 
 /// Shows one live Markdown editor. `id` owns its cursor and undo state.
 pub fn show_editor(ui: &mut Ui, text: &mut String, id: Id, body_size: f32) -> TextEditOutput {
-    let editor_width = ui.available_width();
+    let visible_width = (ui.clip_rect().right() - ui.cursor().left()).max(24.0);
+    let editor_width = ui.available_width().min(visible_width).max(24.0);
     let active_line = ui
         .memory(|memory| memory.has_focus(id))
         .then(|| TextEditState::load(ui.ctx(), id))
