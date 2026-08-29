@@ -261,8 +261,8 @@ async function acceptGithubTraffic(request, env) {
     !Array.isArray(data.clones) ||
     !Array.isArray(data.referrers) ||
     !Array.isArray(data.paths) ||
-    data.views.length > 14 ||
-    data.clones.length > 14 ||
+    data.views.length > 15 ||
+    data.clones.length > 15 ||
     data.referrers.length > 10 ||
     data.paths.length > 10
   ) {
@@ -272,8 +272,11 @@ async function acceptGithubTraffic(request, env) {
   const daily = new Map();
   for (const item of data.views) {
     const date = String(item.timestamp ?? "").slice(0, 10);
-    if (!validDate(date, 14) || !validTrafficMetric(item)) {
-      return json({ error: "Invalid views metric" }, 400);
+    if (!validDate(date, 16)) {
+      return json({ error: "Invalid views date" }, 400);
+    }
+    if (!validTrafficMetric(item)) {
+      return json({ error: "Invalid views counts" }, 400);
     }
     daily.set(date, {
       views_count: item.count,
@@ -284,8 +287,11 @@ async function acceptGithubTraffic(request, env) {
   }
   for (const item of data.clones) {
     const date = String(item.timestamp ?? "").slice(0, 10);
-    if (!validDate(date, 14) || !validTrafficMetric(item)) {
-      return json({ error: "Invalid clones metric" }, 400);
+    if (!validDate(date, 16)) {
+      return json({ error: "Invalid clones date" }, 400);
+    }
+    if (!validTrafficMetric(item)) {
+      return json({ error: "Invalid clones counts" }, 400);
     }
     const metric = daily.get(date) ?? {
       views_count: 0,
