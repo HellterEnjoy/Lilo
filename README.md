@@ -87,7 +87,7 @@ Lilo is designed around a simple idea: opening a note should not force you into 
 | 🏷️ | **Tags and search** | Hierarchical inline or frontmatter tags, usage counts, clickable filters, saved searches and focused positive or negative search operators. |
 | 📎 | **Local attachments** | Paste or drag local images, keep relative Markdown links and inspect unreferenced files without introducing a proprietary media database. |
 | 🗂️ | **Vault organisation** | Nested folders, pinning, sorting, aliases and recent-note navigation for a growing collection. |
-| 🛟 | **Data safety** | Automatic saving, rotating backups, recoverable Trash, external-edit conflict review, diagnostics, import and full-vault export. |
+| 🛟 | **Data safety** | Configurable autosave from 15 seconds to 10 minutes, manual Ctrl+S, save-on-exit, rotating backups, recoverable Trash, external-edit conflict review, diagnostics, import and full-vault export. |
 | 🖥️ | **Adaptive workspace** | Compact and expanded layouts, explorer and inspector sidebars, Zen mode, movable toolbar, themes, typography and always-on-top mode. |
 
 ## A daily workflow that remains plain Markdown

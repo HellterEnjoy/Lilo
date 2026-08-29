@@ -25,10 +25,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 const EXTERNAL_SYNC_INTERVAL: Duration = Duration::from_secs(2);
 const ANALYTICS_INITIAL_DELAY: Duration = Duration::from_secs(10);
 const ANALYTICS_UPDATE_INTERVAL: Duration = Duration::from_secs(15 * 60);
+const AUTOSAVE_INTERVAL_OPTIONS: [u64; 6] = [15, 30, 60, 120, 300, 600];
 
 pub(crate) struct WidgetApp {
     data: AppData,
@@ -37,7 +37,7 @@ pub(crate) struct WidgetApp {
     pending_delete_id: Option<Uuid>,
     dirty_note_ids: HashSet<Uuid>,
     pending_title_rename_ids: HashSet<Uuid>,
-    last_edit_at: Option<Instant>,
+    dirty_since: Option<Instant>,
     storage_message: Option<String>,
     link_index: LinkIndex,
     tag_index: TagIndex,
@@ -388,6 +388,14 @@ fn shortcut_field(ui: &mut egui::Ui, label: &str, value: &mut String) {
     });
 }
 
+fn autosave_interval_label(seconds: u64) -> String {
+    match seconds {
+        60 => "1 minute".to_owned(),
+        seconds if seconds % 60 == 0 => format!("{} minutes", seconds / 60),
+        _ => format!("{seconds} seconds"),
+    }
+}
+
 impl WidgetApp {
     pub(crate) fn new() -> Self {
         let loaded = storage::load_storage().expect("Failed to initialize Markdown storage");
@@ -427,7 +435,7 @@ impl WidgetApp {
             pending_delete_id: None,
             dirty_note_ids: HashSet::new(),
             pending_title_rename_ids: HashSet::new(),
-            last_edit_at: None,
+            dirty_since: None,
             storage_message: None,
             link_index,
             tag_index,
@@ -834,7 +842,7 @@ impl WidgetApp {
 
     fn mark_note_dirty(&mut self, id: Uuid) {
         self.dirty_note_ids.insert(id);
-        self.last_edit_at = Some(Instant::now());
+        self.dirty_since.get_or_insert_with(Instant::now);
     }
 
     fn flush_dirty_notes(&mut self) {
@@ -860,25 +868,27 @@ impl WidgetApp {
             }
         }
 
-        if self.dirty_note_ids.is_empty() {
-            self.last_edit_at = None;
-        }
+        self.dirty_since = (!self.dirty_note_ids.is_empty()).then(Instant::now);
         self.save_settings();
     }
 
-    fn save_after_debounce(&mut self, ctx: &egui::Context) {
-        if self.external_conflict {
+    fn process_autosave(&mut self, ctx: &egui::Context) {
+        if self.external_conflict || !self.settings.autosave_enabled {
             return;
         }
-        let Some(last_edit_at) = self.last_edit_at else {
+        let Some(dirty_since) = self.dirty_since else {
             return;
         };
-        let elapsed = last_edit_at.elapsed();
+        let interval = Duration::from_secs(self.settings.autosave_interval_seconds.clamp(
+            storage::MIN_AUTOSAVE_INTERVAL_SECONDS,
+            storage::MAX_AUTOSAVE_INTERVAL_SECONDS,
+        ));
+        let elapsed = dirty_since.elapsed();
 
-        if elapsed >= SAVE_DEBOUNCE {
+        if elapsed >= interval {
             self.flush_dirty_notes();
         } else {
-            ctx.request_repaint_after(SAVE_DEBOUNCE - elapsed);
+            ctx.request_repaint_after(interval - elapsed);
         }
     }
 
@@ -2098,6 +2108,48 @@ impl WidgetApp {
                                     Some(format!("Could not open vault: {error}"));
                             }
                         });
+                        let autosave_before = (
+                            self.settings.autosave_enabled,
+                            self.settings.autosave_interval_seconds,
+                        );
+                        ui.checkbox(
+                            &mut self.settings.autosave_enabled,
+                            "Automatically save edited notes",
+                        );
+                        ui.add_enabled_ui(self.settings.autosave_enabled, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label("Autosave interval:");
+                                egui::ComboBox::from_id_salt("autosave_interval")
+                                    .selected_text(autosave_interval_label(
+                                        self.settings.autosave_interval_seconds,
+                                    ))
+                                    .show_ui(ui, |ui| {
+                                        for seconds in AUTOSAVE_INTERVAL_OPTIONS {
+                                            ui.selectable_value(
+                                                &mut self.settings.autosave_interval_seconds,
+                                                seconds,
+                                                autosave_interval_label(seconds),
+                                            );
+                                        }
+                                    });
+                            });
+                        });
+                        ui_style::muted(
+                            ui,
+                            "Ctrl+S and saving on application exit remain available when autosave is disabled.",
+                        );
+                        if autosave_before
+                            != (
+                                self.settings.autosave_enabled,
+                                self.settings.autosave_interval_seconds,
+                            )
+                        {
+                            if self.settings.autosave_enabled && !self.dirty_note_ids.is_empty() {
+                                self.dirty_since = Some(Instant::now());
+                            }
+                            self.save_settings();
+                        }
+                        ui.separator();
                         ui.checkbox(
                             &mut self.settings.backups_enabled,
                             "Create backups before overwriting notes",
@@ -3458,7 +3510,11 @@ impl WidgetApp {
                     let saving = self.dirty_note_ids.contains(&note.id);
                     let updated = note.updated_at.format("%H:%M").to_string();
                     let save_status = if saving {
-                        "Saving...".to_owned()
+                        if self.settings.autosave_enabled {
+                            "Autosave pending".to_owned()
+                        } else {
+                            "Unsaved".to_owned()
+                        }
                     } else {
                         format!("Saved · {updated}")
                     };
@@ -5086,7 +5142,7 @@ impl eframe::App for WidgetApp {
             self.analytics_details_open = open;
         }
 
-        self.save_after_debounce(&ctx);
+        self.process_autosave(&ctx);
         self.sync_external_changes(&ctx);
         self.process_analytics(&ctx);
     }

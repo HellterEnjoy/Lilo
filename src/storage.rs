@@ -11,7 +11,10 @@ use uuid::Uuid;
 
 pub type StorageResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
-const SETTINGS_VERSION: u32 = 7;
+const SETTINGS_VERSION: u32 = 8;
+pub const MIN_AUTOSAVE_INTERVAL_SECONDS: u64 = 15;
+pub const MAX_AUTOSAVE_INTERVAL_SECONDS: u64 = 10 * 60;
+pub const DEFAULT_AUTOSAVE_INTERVAL_SECONDS: u64 = 30;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NoteSort {
@@ -249,6 +252,8 @@ pub struct AppSettings {
     pub autostart: bool,
     pub shortcuts: ShortcutSettings,
     pub graph_node_offsets: Vec<GraphNodeOffset>,
+    pub autosave_enabled: bool,
+    pub autosave_interval_seconds: u64,
     pub backups_enabled: bool,
     pub backup_limit: usize,
     pub toolbar_placement: ToolbarPlacement,
@@ -318,6 +323,8 @@ impl Default for AppSettings {
             autostart: false,
             shortcuts: ShortcutSettings::default(),
             graph_node_offsets: Vec::new(),
+            autosave_enabled: true,
+            autosave_interval_seconds: DEFAULT_AUTOSAVE_INTERVAL_SECONDS,
             backups_enabled: true,
             backup_limit: 20,
             toolbar_placement: ToolbarPlacement::Auto,
@@ -380,6 +387,9 @@ pub fn load_storage() -> StorageResult<LoadedStorage> {
     if settings.sidebar_width == 0.0 {
         settings.sidebar_width = 220.0;
     }
+    settings.autosave_interval_seconds = settings
+        .autosave_interval_seconds
+        .clamp(MIN_AUTOSAVE_INTERVAL_SECONDS, MAX_AUTOSAVE_INTERVAL_SECONDS);
     if settings.daily_note_format.trim().is_empty() {
         settings.daily_note_format = "%Y-%m-%d".to_owned();
     }
@@ -1728,6 +1738,11 @@ mod tests {
 
         assert_eq!(settings.note_sort, NoteSort::Updated);
         assert_eq!(settings.theme, ThemeChoice::Dark);
+        assert!(settings.autosave_enabled);
+        assert_eq!(
+            settings.autosave_interval_seconds,
+            DEFAULT_AUTOSAVE_INTERVAL_SECONDS
+        );
         assert!(settings.backups_enabled);
         assert_eq!(settings.shortcuts.graph_overlay, "Ctrl+Shift+G");
         assert_eq!(settings.toolbar_placement, ToolbarPlacement::Auto);
