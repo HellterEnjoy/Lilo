@@ -1,0 +1,14 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "lilo-analytics",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-29",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "database_lilo",
+      "database_id": "d5e1b1c5-e159-4c70-a4fe-058c25e6c657",
+      "migrations_dir": "migrations"
+    }
+  ]
+}

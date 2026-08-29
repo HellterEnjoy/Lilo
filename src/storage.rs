@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 pub type StorageResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
-const SETTINGS_VERSION: u32 = 6;
+const SETTINGS_VERSION: u32 = 7;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NoteSort {
@@ -255,6 +255,7 @@ pub struct AppSettings {
     pub toolbar_expanded: bool,
     pub floating_toolbar_vertical: bool,
     pub floating_toolbar_position: [f32; 2],
+    pub analytics: crate::analytics::AnalyticsSettings,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -323,6 +324,7 @@ impl Default for AppSettings {
             toolbar_expanded: false,
             floating_toolbar_vertical: false,
             floating_toolbar_position: [24.0, 72.0],
+            analytics: crate::analytics::AnalyticsSettings::default(),
         }
     }
 }

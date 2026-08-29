@@ -49,7 +49,7 @@ try {
     New-Item -ItemType Directory -Path $packageDirectory | Out-Null
 
     Copy-Item -LiteralPath $executable -Destination $packageDirectory
-    foreach ($document in @('README.md', 'ROADMAP.md', 'CHANGELOG.md', 'RELEASE.md', 'LICENSE')) {
+    foreach ($document in @('README.md', 'ROADMAP.md', 'CHANGELOG.md', 'RELEASE.md', 'PRIVACY.md', 'LICENSE')) {
         Copy-Item -LiteralPath (Join-Path $repositoryRoot $document) -Destination $packageDirectory
     }
 

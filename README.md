@@ -16,7 +16,7 @@ It stays compact when you need a quick thought and expands into a complete writi
 [![Linux](https://img.shields.io/badge/Linux-x86--64-fcc624?style=for-the-badge&logo=linux&logoColor=black)](#install-lilo)
 [![License](https://img.shields.io/badge/license-PolyForm_NC-70517c?style=for-the-badge)](LICENSE)
 
-[**Download Lilo**](https://github.com/HellterEnjoy/Lilo/releases/latest) · [Features](#everything-you-need-without-leaving-the-widget) · [Build from source](#build-from-source) · [Roadmap](ROADMAP.md)
+[**Download Lilo**](https://github.com/HellterEnjoy/Lilo/releases/latest) · [Features](#everything-you-need-without-leaving-the-widget) · [Build from source](#build-from-source) · [Privacy](PRIVACY.md) · [Roadmap](ROADMAP.md)
 
 <br />
 
@@ -24,7 +24,30 @@ It stays compact when you need a quick thought and expands into a complete writi
 
 </div>
 
-> **Knowledge Workflow · v0.2.0** — Daily capture, hierarchical tags, local attachments and link-safe navigation now form one stable workflow. Notes, templates and metadata remain ordinary local files.
+> [!IMPORTANT]
+> **Transparent analytics in v0.2.1**
+>
+> Lilo uses two separate sources of product statistics:
+>
+> - **Optional application analytics:** only after explicit consent, Lilo sends a random installation UUID, the local calendar date, the application version and daily numeric counters from a fixed feature whitelist. The counters are sent periodically to a Cloudflare Worker and stored in D1. Analytics can be disabled at any time from Settings, which also queues deletion of that installation's existing rows.
+> - **GitHub repository traffic:** a daily GitHub Action archives the repository-level views, unique visitors, clones, referrers and popular paths returned by GitHub's Traffic API. This is separate from the desktop application and contains no Lilo installation identifier.
+>
+> Lilo does **not** send note contents, titles, filenames, vault paths, tags, aliases, search text, Quick Capture text, wiki-link targets, device identifiers or account details. The Worker does not store request IP addresses in D1.
+>
+> The complete implementation is public: [desktop whitelist and payload](src/analytics.rs), [Cloudflare Worker](analytics-worker/src/index.js), [D1 schema](analytics-worker/migrations/0001_schema.sql), [GitHub traffic workflow](.github/workflows/collect-traffic.yml) and the full [privacy notice](PRIVACY.md).
+
+<details>
+<summary><strong>Exact application feature whitelist (21 counters)</strong></summary>
+
+`note_created`, `daily_note_opened`, `quick_capture_saved`,
+`template_note_created`, `template_inserted`, `markdown_formatting_used`,
+`search_used`, `saved_search_created`, `command_palette_used`,
+`wiki_link_opened`, `graph_opened`, `tag_filter_used`, `attachment_added`,
+`note_pinned`, `folder_created`, `trash_restored`, `backup_restored`,
+`markdown_imported`, `vault_exported`, `zen_mode_enabled` and
+`always_on_top_enabled`.
+
+</details>
 
 ## One app, two scales
 
@@ -195,20 +218,20 @@ Download the latest packages and matching SHA-256 files from [GitHub Releases](h
 
 ### Windows
 
-- `Lilo-0.2.0-windows-x64-setup.exe` — per-user installer with a Start menu shortcut; administrator access is not required.
-- `Lilo-0.2.0-windows-x64.zip` — portable archive for manual installation.
+- `Lilo-0.2.1-windows-x64-setup.exe` — per-user installer with a Start menu shortcut; administrator access is not required.
+- `Lilo-0.2.1-windows-x64.zip` — portable archive for manual installation.
 
 The current binaries are not code-signed, so Windows SmartScreen may display a warning. WinGet distribution is prepared but remains unavailable until the initial package is accepted into the community repository.
 
 ### Linux
 
-- `Lilo-0.2.0-ubuntu-22.04-x86_64.tar.gz` — Ubuntu 22.04 or newer.
-- `Lilo-0.2.0-arch-x86_64.tar.gz` — current Arch Linux.
+- `Lilo-0.2.1-ubuntu-22.04-x86_64.tar.gz` — Ubuntu 22.04 or newer.
+- `Lilo-0.2.1-arch-x86_64.tar.gz` — current Arch Linux.
 
 ```bash
-sha256sum -c Lilo-0.2.0-<platform>-x86_64.tar.gz.sha256
-tar -xzf Lilo-0.2.0-<platform>-x86_64.tar.gz
-cd Lilo-0.2.0-<platform>-x86_64
+sha256sum -c Lilo-0.2.1-<platform>-x86_64.tar.gz.sha256
+tar -xzf Lilo-0.2.1-<platform>-x86_64.tar.gz
+cd Lilo-0.2.1-<platform>-x86_64
 install -Dm755 Lilo "$HOME/.local/bin/Lilo"
 "$HOME/.local/bin/Lilo"
 ```
@@ -259,7 +282,7 @@ Windows and Ubuntu run formatting, tests and Clippy in CI. Linux releases are cu
 
 ## Project status
 
-Version `v0.2.0` stabilises Lilo's daily and knowledge workflow: capture, templates, hierarchical tags, attachments, structured search and safer connected-note navigation. Lilo does not yet provide automatic updates, code signing, native Linux packages, a system-wide Linux capture hotkey or an official macOS build. Graph density and expensive live highlighting remain intentionally bounded to keep the widget responsive.
+Version `v0.2.1` adds explicit opt-in usage analytics with a public event whitelist, in-app deletion and a separate GitHub traffic archive. Lilo does not yet provide automatic updates, code signing, native Linux packages, a system-wide Linux capture hotkey or an official macOS build. Graph density and expensive live highlighting remain intentionally bounded to keep the widget responsive.
 
 - [Roadmap](ROADMAP.md) — planned product direction;
 - [Changelog](CHANGELOG.md) — implemented release history;

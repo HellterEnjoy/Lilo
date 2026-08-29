@@ -44,6 +44,7 @@ RestartApplications=no
 Source: "{#MySourceExe}"; DestDir: "{app}"; DestName: "Lilo.exe"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\CHANGELOG.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\PRIVACY.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]

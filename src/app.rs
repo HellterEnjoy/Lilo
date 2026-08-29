@@ -1,3 +1,6 @@
+use crate::analytics::{
+    self, AnalyticsClient, AnalyticsFeature, AnalyticsOperation, AnalyticsResult,
+};
 use crate::commands::{self, CommandAction, CommandPaletteResult, CommandPaletteState};
 use crate::daily::LocalDateService;
 use crate::folders;
@@ -24,6 +27,8 @@ use uuid::Uuid;
 
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 const EXTERNAL_SYNC_INTERVAL: Duration = Duration::from_secs(2);
+const ANALYTICS_INITIAL_DELAY: Duration = Duration::from_secs(10);
+const ANALYTICS_UPDATE_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
 pub(crate) struct WidgetApp {
     data: AppData,
@@ -90,6 +95,16 @@ pub(crate) struct WidgetApp {
     pending_folder_delete: Option<PathBuf>,
     pending_folder_notes_count: usize,
     pending_cursor_char_index: Option<(Uuid, usize)>,
+
+    // Analytics is opt-in and all network work runs outside the UI thread.
+    analytics_client: AnalyticsClient,
+    analytics_dirty: bool,
+    analytics_report_in_flight: bool,
+    analytics_deletion_in_flight: bool,
+    analytics_next_send: Instant,
+    analytics_next_delete_attempt: Instant,
+    analytics_status: Option<String>,
+    analytics_details_open: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -401,6 +416,9 @@ impl WidgetApp {
             loaded.settings.global_quick_capture_enabled,
             &loaded.settings.global_quick_capture_shortcut,
         );
+        let analytics_dirty = loaded.settings.analytics.enabled();
+        let analytics_client = AnalyticsClient::new(analytics::configured_endpoint());
+        let now = Instant::now();
 
         Self {
             data: loaded.data,
@@ -462,6 +480,14 @@ impl WidgetApp {
             pending_folder_delete: None,
             pending_folder_notes_count: 0,
             pending_cursor_char_index: None,
+            analytics_client,
+            analytics_dirty,
+            analytics_report_in_flight: false,
+            analytics_deletion_in_flight: false,
+            analytics_next_send: now + ANALYTICS_INITIAL_DELAY,
+            analytics_next_delete_attempt: now,
+            analytics_status: None,
+            analytics_details_open: false,
         }
     }
 
@@ -471,6 +497,153 @@ impl WidgetApp {
             storage::save_settings(&self.storage_paths.settings_path, &self.settings)
         {
             self.storage_message = Some(format!("Failed to save settings: {error}"));
+        }
+    }
+
+    fn record_analytics(&mut self, feature: AnalyticsFeature) {
+        if self.settings.analytics.record(feature) {
+            self.analytics_dirty = true;
+        }
+    }
+
+    fn set_analytics_enabled(&mut self, enabled: bool) {
+        if enabled {
+            self.settings.analytics.enable();
+            self.analytics_dirty = true;
+            self.analytics_next_send = Instant::now() + ANALYTICS_INITIAL_DELAY;
+            self.analytics_status = Some("Analytics enabled".to_owned());
+        } else {
+            self.settings.analytics.disable_and_queue_deletion();
+            self.analytics_dirty = false;
+            self.analytics_next_delete_attempt = Instant::now();
+            self.analytics_status = Some(
+                "Analytics disabled; previously collected data is queued for deletion".to_owned(),
+            );
+        }
+        self.save_settings();
+    }
+
+    fn process_analytics(&mut self, ctx: &egui::Context) {
+        while let Some(result) = self.analytics_client.try_result() {
+            match result {
+                AnalyticsResult::Delivered(AnalyticsOperation::DailyReport, _) => {
+                    self.analytics_report_in_flight = false;
+                    self.analytics_status = Some("Latest daily counters delivered".to_owned());
+                }
+                AnalyticsResult::Delivered(
+                    AnalyticsOperation::DeleteInstallation,
+                    Some(installation_id),
+                ) => {
+                    self.analytics_deletion_in_flight = false;
+                    self.settings.analytics.finish_deletion(installation_id);
+                    self.analytics_status = Some("Collected analytics data deleted".to_owned());
+                    self.save_settings();
+                }
+                AnalyticsResult::Delivered(AnalyticsOperation::DeleteInstallation, None) => {
+                    self.analytics_deletion_in_flight = false;
+                }
+                AnalyticsResult::Failed(AnalyticsOperation::DailyReport) => {
+                    self.analytics_report_in_flight = false;
+                    self.analytics_dirty = true;
+                    self.analytics_next_send = Instant::now() + ANALYTICS_UPDATE_INTERVAL;
+                    self.analytics_status = Some(
+                        "Analytics delivery failed; Lilo will retry without interrupting your work"
+                            .to_owned(),
+                    );
+                }
+                AnalyticsResult::Failed(AnalyticsOperation::DeleteInstallation) => {
+                    self.analytics_deletion_in_flight = false;
+                    self.analytics_next_delete_attempt = Instant::now() + ANALYTICS_UPDATE_INTERVAL;
+                    self.analytics_status =
+                        Some("Deletion is pending and will be retried automatically".to_owned());
+                }
+            }
+        }
+
+        let now = Instant::now();
+        if let Some(installation_id) = self.settings.analytics.pending_deletion_id
+            && !self.analytics_deletion_in_flight
+            && now >= self.analytics_next_delete_attempt
+            && self.analytics_client.delete_installation(installation_id)
+        {
+            self.analytics_deletion_in_flight = true;
+        }
+
+        if self.settings.analytics.enabled()
+            && self.analytics_dirty
+            && !self.analytics_report_in_flight
+            && now >= self.analytics_next_send
+            && let Some(payload) = self.settings.analytics.daily_payload()
+            && self.analytics_client.send_daily(payload)
+        {
+            self.analytics_dirty = false;
+            self.analytics_report_in_flight = true;
+            self.analytics_next_send = now + ANALYTICS_UPDATE_INTERVAL;
+            self.save_settings();
+        }
+
+        if self.analytics_report_in_flight || self.analytics_deletion_in_flight {
+            ctx.request_repaint_after(Duration::from_secs(1));
+        } else if self.settings.analytics.enabled() && self.analytics_dirty {
+            ctx.request_repaint_after(self.analytics_next_send.saturating_duration_since(now));
+        } else if self.settings.analytics.pending_deletion_id.is_some() {
+            ctx.request_repaint_after(
+                self.analytics_next_delete_attempt
+                    .saturating_duration_since(now),
+            );
+        }
+    }
+
+    fn show_analytics_data_description(ui: &mut egui::Ui) {
+        ui.label("Lilo sends only:");
+        ui.label("• a random installation identifier");
+        ui.label("• the local calendar date and Lilo version");
+        ui.label("• daily counters from the fixed feature whitelist below");
+        ui.add_space(6.0);
+        ui.small(analytics::FEATURE_NAMES.join(", "));
+        ui.add_space(6.0);
+        ui.label("Lilo never sends note contents, titles, paths, tags, search queries, window names, device details or account information.");
+        ui.label("Cloudflare necessarily handles the network connection, but Lilo does not store the request IP address in its database.");
+    }
+
+    fn show_analytics_consent(&mut self, ctx: &egui::Context) {
+        if self.settings.analytics.consent.is_some() {
+            return;
+        }
+
+        let mut choice = None;
+        let center = ui_style::screen_rect(ctx).center();
+        egui::Window::new("Help improve Lilo?")
+            .id(egui::Id::new("analytics_consent"))
+            .collapsible(false)
+            .resizable(false)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(center)
+            .show(ctx, |ui| {
+                ui.set_max_width(480.0);
+                ui.label("With your permission, Lilo can send privacy-preserving usage analytics to help prioritise improvements.");
+                ui.add_space(6.0);
+                Self::show_analytics_data_description(ui);
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Allow analytics").clicked() {
+                        choice = Some(true);
+                    }
+                    if ui.button("No, thanks").clicked() {
+                        choice = Some(false);
+                    }
+                });
+                ui.small("Your choice can be changed at any time in Settings.");
+            });
+
+        if let Some(enabled) = choice {
+            if enabled {
+                self.set_analytics_enabled(true);
+            } else {
+                self.settings.analytics.decline();
+                self.analytics_status = Some("Analytics disabled".to_owned());
+                self.save_settings();
+            }
         }
     }
 
@@ -494,6 +667,9 @@ impl WidgetApp {
     }
 
     fn activate_view(&mut self, view: AppView) {
+        if view == AppView::Graph && self.view != AppView::Graph {
+            self.record_analytics(AnalyticsFeature::GraphOpened);
+        }
         self.view = view;
         self.pending_delete_id = None;
         self.focus_search = view == AppView::NotesList;
@@ -607,6 +783,9 @@ impl WidgetApp {
             self.settings.zen_mode,
         );
         if before != after {
+            if !before.3 && after.3 {
+                self.record_analytics(AnalyticsFeature::ZenModeEnabled);
+            }
             self.save_settings();
         }
         if let Some(view) = requested_view {
@@ -713,7 +892,9 @@ impl WidgetApp {
         self.focus_search = false;
         self.focus_editor = true;
         self.link_index = LinkIndex::build(&self.data.notes, &self.storage_paths.notes_dir);
-        self.save_note_now(id);
+        if self.save_note_now(id) {
+            self.record_analytics(AnalyticsFeature::NoteCreated);
+        }
         self.save_settings();
     }
 
@@ -772,6 +953,7 @@ impl WidgetApp {
 
         if let Some(id) = existing_id {
             self.open_note(id);
+            self.record_analytics(AnalyticsFeature::DailyNoteOpened);
             return;
         }
 
@@ -814,9 +996,12 @@ impl WidgetApp {
             self.pending_cursor_char_index = Some((id, pos));
         }
 
-        self.save_note_now(id);
+        let saved = self.save_note_now(id);
         self.link_index = LinkIndex::build(&self.data.notes, &self.storage_paths.notes_dir);
         self.open_note(id);
+        if saved {
+            self.record_analytics(AnalyticsFeature::DailyNoteOpened);
+        }
         self.storage_message = Some(format!(
             "Opened daily note for {}",
             target_date.format("%Y-%m-%d")
@@ -858,9 +1043,12 @@ impl WidgetApp {
             self.pending_cursor_char_index = Some((id, pos));
         }
 
-        self.save_note_now(id);
+        let saved = self.save_note_now(id);
         self.link_index = LinkIndex::build(&self.data.notes, &self.storage_paths.notes_dir);
         self.open_note(id);
+        if saved {
+            self.record_analytics(AnalyticsFeature::TemplateNoteCreated);
+        }
         self.storage_message = Some(format!("Created note from template '{template_name}'"));
     }
 
@@ -885,6 +1073,7 @@ impl WidgetApp {
             .unwrap_or_default();
         let (expanded, _) = TemplateEngine::expand(&template_text, &title, LocalDateService::now());
 
+        let mut inserted = false;
         if let Some(note) = self.data.notes.iter_mut().find(|n| n.id == selected_id) {
             if !note.content.is_empty() && !note.content.ends_with('\n') {
                 note.content.push('\n');
@@ -894,6 +1083,10 @@ impl WidgetApp {
             self.link_index.refresh_note_content(note);
             self.mark_note_dirty(selected_id);
             self.storage_message = Some(format!("Inserted template '{template_name}'"));
+            inserted = true;
+        }
+        if inserted {
+            self.record_analytics(AnalyticsFeature::TemplateInserted);
         }
     }
 
@@ -901,7 +1094,7 @@ impl WidgetApp {
     pub fn apply_quick_capture(&mut self, submission: QuickCaptureSubmission) {
         let entry = quick_capture::format_capture_entry(&submission.text, submission.timestamp);
 
-        let captured_note_id = match submission.target {
+        let (captured_note_id, captured) = match submission.target {
             QuickCaptureTarget::DailyNote => {
                 let target_date = LocalDateService::today();
                 let (subfolder, note_title) = match LocalDateService::format_daily_path(
@@ -947,9 +1140,9 @@ impl WidgetApp {
                         String::new()
                     };
 
-                self.save_note_now(note_id);
+                let saved = self.save_note_now(note_id);
                 self.storage_message = Some(format!("Captured to daily note ({target_title})"));
-                note_id
+                (note_id, saved)
             }
             QuickCaptureTarget::Inbox => {
                 let inbox_title = "Inbox";
@@ -981,9 +1174,9 @@ impl WidgetApp {
                     self.link_index.refresh_note_content(note);
                 }
 
-                self.save_note_now(note_id);
+                let saved = self.save_note_now(note_id);
                 self.storage_message = Some("Captured to Inbox".to_owned());
-                note_id
+                (note_id, saved)
             }
             QuickCaptureTarget::NewNote => {
                 let note_directory = storage::ensure_note_folder(
@@ -998,10 +1191,10 @@ impl WidgetApp {
                     note.content = format!("# {}\n\n{}", title, entry);
                     note.refresh_search_text();
                 }
-                self.save_note_now(id);
+                let saved = self.save_note_now(id);
                 self.link_index = LinkIndex::build(&self.data.notes, &self.storage_paths.notes_dir);
                 self.storage_message = Some(format!("Created capture note '{title}'"));
-                id
+                (id, saved)
             }
             QuickCaptureTarget::CustomNote(target_title) => {
                 let clean_title = if target_title.trim().is_empty() {
@@ -1041,9 +1234,9 @@ impl WidgetApp {
                     self.link_index.refresh_note_content(note);
                 }
 
-                self.save_note_now(note_id);
+                let saved = self.save_note_now(note_id);
                 self.storage_message = Some(format!("Captured to '{clean_title}'"));
-                note_id
+                (note_id, saved)
             }
         };
 
@@ -1053,6 +1246,9 @@ impl WidgetApp {
             .retain(|&recent_id| recent_id != captured_note_id);
         self.settings.recent_note_ids.insert(0, captured_note_id);
         self.settings.recent_note_ids.truncate(15);
+        if captured {
+            self.record_analytics(AnalyticsFeature::QuickCaptureSaved);
+        }
         self.save_settings();
     }
 
@@ -1072,6 +1268,7 @@ impl WidgetApp {
                 self.show_new_folder_input = false;
                 self.vault_snapshot =
                     storage::vault_snapshot(&self.storage_paths.notes_dir).unwrap_or_default();
+                self.record_analytics(AnalyticsFeature::FolderCreated);
                 self.save_settings();
             }
             Err(error) => {
@@ -1109,10 +1306,15 @@ impl WidgetApp {
     }
 
     fn toggle_pin(&mut self, id: Uuid) {
+        let mut pinned = false;
         if let Some(note) = self.data.notes.iter_mut().find(|note| note.id == id) {
             note.pinned = !note.pinned;
+            pinned = note.pinned;
             note.mark_as_updated();
             self.mark_note_dirty(id);
+        }
+        if pinned {
+            self.record_analytics(AnalyticsFeature::NotePinned);
         }
     }
 
@@ -1328,7 +1530,10 @@ impl WidgetApp {
                 });
                 if let Some(relative) = restore {
                     match storage::restore_from_trash(&self.storage_paths, &relative) {
-                        Ok(_) => self.reload_vault("Note restored"),
+                        Ok(_) => {
+                            self.record_analytics(AnalyticsFeature::TrashRestored);
+                            self.reload_vault("Note restored");
+                        }
                         Err(error) => {
                             self.storage_message = Some(format!("Restore failed: {error}"))
                         }
@@ -1431,6 +1636,7 @@ impl WidgetApp {
                         storage::vault_snapshot(&self.storage_paths.notes_dir).unwrap_or_default();
                     self.storage_message =
                         Some("Backup restored; the previous version was preserved".to_owned());
+                    self.record_analytics(AnalyticsFeature::BackupRestored);
                 }
                 Err(error) => self.storage_message = Some(format!("Restore failed: {error}")),
             }
@@ -1519,6 +1725,7 @@ impl WidgetApp {
                 self.import_path_buffer.clear();
                 self.storage_message = Some("Markdown note imported".to_owned());
                 self.view = AppView::Editor;
+                self.record_analytics(AnalyticsFeature::MarkdownImported);
                 self.save_settings();
             }
             Err(error) => self.storage_message = Some(format!("Import failed: {error}")),
@@ -1530,7 +1737,8 @@ impl WidgetApp {
         let destination = PathBuf::from(self.export_path_buffer.trim());
         match storage::export_vault(&self.storage_paths, &destination) {
             Ok(path) => {
-                self.storage_message = Some(format!("Vault exported to {}", path.display()))
+                self.storage_message = Some(format!("Vault exported to {}", path.display()));
+                self.record_analytics(AnalyticsFeature::VaultExported);
             }
             Err(error) => self.storage_message = Some(format!("Export failed: {error}")),
         }
@@ -1567,7 +1775,13 @@ impl WidgetApp {
                         egui::Slider::new(&mut self.settings.ui_font_size, 11.0..=20.0)
                             .text("UI interface font size"),
                     );
-                    ui.checkbox(&mut self.settings.zen_mode, "Zen / Writing mode (F11)");
+                    if ui
+                        .checkbox(&mut self.settings.zen_mode, "Zen / Writing mode (F11)")
+                        .changed()
+                        && self.settings.zen_mode
+                    {
+                        self.record_analytics(AnalyticsFeature::ZenModeEnabled);
+                    }
                     ui.horizontal(|ui| {
                         ui.label("Accent");
                         ui.color_edit_button_srgb(&mut self.settings.accent_rgb);
@@ -1576,6 +1790,9 @@ impl WidgetApp {
                         .checkbox(&mut self.settings.always_on_top, "Always on top")
                         .changed()
                     {
+                        if self.settings.always_on_top {
+                            self.record_analytics(AnalyticsFeature::AlwaysOnTopEnabled);
+                        }
                         ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
                             if self.settings.always_on_top {
                                 egui::viewport::WindowLevel::AlwaysOnTop
@@ -1948,6 +2165,48 @@ impl WidgetApp {
                     });
             });
 
+            ui.add_space(7.0);
+            ui_style::card_frame(ui).show(ui, |ui| {
+                egui::CollapsingHeader::new(
+                    egui::RichText::new("Privacy & Analytics").strong(),
+                )
+                .id_salt("settings_privacy_analytics")
+                .show(ui, |ui| {
+                    ui_style::muted(
+                        ui,
+                        "Optional usage counters with no note contents or personal profile",
+                    );
+                    let mut enabled = self.settings.analytics.enabled();
+                    if ui
+                        .checkbox(&mut enabled, "Share privacy-preserving usage analytics")
+                        .changed()
+                    {
+                        self.set_analytics_enabled(enabled);
+                    }
+
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("View exactly what is sent").clicked() {
+                            self.analytics_details_open = true;
+                        }
+                        if self.settings.analytics.enabled()
+                            && ui.button("Disable and delete my analytics data").clicked()
+                        {
+                            self.set_analytics_enabled(false);
+                        }
+                    });
+
+                    if self.settings.analytics.pending_deletion_id.is_some() {
+                        ui_style::muted(
+                            ui,
+                            "Deletion is pending and will retry automatically when online.",
+                        );
+                    }
+                    if let Some(status) = &self.analytics_status {
+                        ui_style::muted(ui, status);
+                    }
+                });
+            });
+
             ui.add_space(10.0);
             if ui
                 .add(
@@ -2082,6 +2341,9 @@ impl WidgetApp {
         if self.focus_search {
             search_response.request_focus();
             self.focus_search = false;
+        }
+        if search_response.lost_focus() && !self.search_query.trim().is_empty() {
+            self.record_analytics(AnalyticsFeature::SearchUsed);
         }
 
         ui.horizontal(|ui| {
@@ -2242,7 +2504,6 @@ impl WidgetApp {
                 self.history_back.remove(0);
             }
         }
-
         self.data.selected_note_id = Some(id);
         self.pending_delete_id = None;
         self.view = AppView::Editor;
@@ -2774,6 +3035,7 @@ impl WidgetApp {
             if let Some(tag) = filter_tag {
                 self.search_query = format!("tag:{tag}");
                 self.focus_search = false;
+                self.record_analytics(AnalyticsFeature::TagFilterUsed);
             }
             if let Some(tag) = rename_tag_target {
                 self.tag_to_rename = tag.clone();
@@ -2838,6 +3100,7 @@ impl WidgetApp {
                                         name: self.new_preset_name_buffer.trim().to_owned(),
                                         query: self.search_query.trim().to_owned(),
                                     });
+                                    self.record_analytics(AnalyticsFeature::SavedSearchCreated);
                                     self.save_settings();
                                     self.show_new_preset_input = false;
                                 }
@@ -2887,6 +3150,9 @@ impl WidgetApp {
         if self.focus_search {
             search_response.request_focus();
             self.focus_search = false;
+        }
+        if search_response.lost_focus() && !self.search_query.trim().is_empty() {
+            self.record_analytics(AnalyticsFeature::SearchUsed);
         }
 
         ui.add_space(4.0);
@@ -3282,6 +3548,9 @@ impl WidgetApp {
             CommandAction::ViewSettings => self.activate_view(AppView::Settings),
             CommandAction::ToggleZenMode => {
                 self.settings.zen_mode = !self.settings.zen_mode;
+                if self.settings.zen_mode {
+                    self.record_analytics(AnalyticsFeature::ZenModeEnabled);
+                }
                 self.save_settings();
             }
             CommandAction::ToggleLeftSidebar => {
@@ -3317,6 +3586,9 @@ impl WidgetApp {
             }
             CommandAction::ToggleAlwaysOnTop => {
                 self.settings.always_on_top = !self.settings.always_on_top;
+                if self.settings.always_on_top {
+                    self.record_analytics(AnalyticsFeature::AlwaysOnTopEnabled);
+                }
                 self.window_settings_applied = false;
                 self.save_settings();
             }
@@ -3360,6 +3632,7 @@ impl WidgetApp {
                         name,
                         query: self.search_query.trim().to_owned(),
                     });
+                    self.record_analytics(AnalyticsFeature::SavedSearchCreated);
                     self.save_settings();
                     self.storage_message = Some("Saved search preset".to_owned());
                 }
@@ -3375,6 +3648,8 @@ impl WidgetApp {
 impl eframe::App for WidgetApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        let mut analytics_events = Vec::new();
+        self.process_analytics(&ctx);
 
         while let Some(event) = self.hotkey_manager.try_recv() {
             match event {
@@ -3490,6 +3765,9 @@ impl eframe::App for WidgetApp {
 
         if zen_mode_shortcut {
             self.settings.zen_mode = !self.settings.zen_mode;
+            if self.settings.zen_mode {
+                analytics_events.push(AnalyticsFeature::ZenModeEnabled);
+            }
             self.save_settings();
         }
         if command_palette_shortcut && !self.quick_capture_state.is_open {
@@ -3521,10 +3799,7 @@ impl eframe::App for WidgetApp {
         });
 
         if let Some(view) = direct_view {
-            self.view = view;
-            self.focus_search = view == AppView::NotesList;
-            self.focus_editor = view == AppView::Editor;
-            self.pending_delete_id = None;
+            self.activate_view(view);
         }
 
         if self.view == AppView::NotesList {
@@ -3557,20 +3832,21 @@ impl eframe::App for WidgetApp {
             self.pending_delete_id = None;
         }
         if toggle_graph_shortcut {
-            self.view = if self.view == AppView::Graph {
+            let target = if self.view == AppView::Graph {
                 AppView::Editor
             } else {
                 AppView::Graph
             };
-            self.pending_delete_id = None;
-            self.focus_search = false;
-            self.focus_editor = self.view == AppView::Editor;
+            self.activate_view(target);
         }
 
         // QoL Fix: Disable Ctrl+Shift+G when in compact mode!
         if toggle_overlay_shortcut {
             if window_width >= ui_style::COMPACT_WIDTH {
                 self.graph_overlay_open = !self.graph_overlay_open;
+                if self.graph_overlay_open {
+                    analytics_events.push(AnalyticsFeature::GraphOpened);
+                }
             } else {
                 self.storage_message = Some("Graph overlay is disabled in compact mode".to_owned());
             }
@@ -3892,6 +4168,9 @@ impl eframe::App for WidgetApp {
                     }
                     if zen_clicked {
                         self.settings.zen_mode = !self.settings.zen_mode;
+                        if self.settings.zen_mode {
+                            analytics_events.push(AnalyticsFeature::ZenModeEnabled);
+                        }
                         self.save_settings();
                     }
                     if capture_clicked {
@@ -4172,6 +4451,12 @@ impl eframe::App for WidgetApp {
                                                             command_changed = true;
                                                         }
 
+                                                        if command_changed {
+                                                            analytics_events.push(
+                                                                AnalyticsFeature::MarkdownFormattingUsed,
+                                                            );
+                                                        }
+
                                                         // Drag & Drop Attachment Files
                                                         let dropped_files = ui.ctx().input(|i| i.raw.dropped_files.clone());
                                                         if !dropped_files.is_empty() {
@@ -4198,6 +4483,9 @@ impl eframe::App for WidgetApp {
                                                                         is_img,
                                                                     );
                                                                     command_changed = true;
+                                                                    analytics_events.push(
+                                                                        AnalyticsFeature::AttachmentAdded,
+                                                                    );
                                                                     self.storage_message = Some(format!("Imported attachment: {rel_link}"));
                                                                 }
                                                             }
@@ -4267,6 +4555,9 @@ impl eframe::App for WidgetApp {
                                                                         true,
                                                                     );
                                                                     command_changed = true;
+                                                                    analytics_events.push(
+                                                                        AnalyticsFeature::AttachmentAdded,
+                                                                    );
                                                                     self.storage_message = Some(format!("Pasted image saved: {rel_link}"));
                                                                 }
                                                                 Ok(None) => {
@@ -4484,6 +4775,9 @@ impl eframe::App for WidgetApp {
                                                     }
 
                                                     if let Some(target) = activated_link_target {
+                                                        analytics_events.push(
+                                                            AnalyticsFeature::WikiLinkOpened,
+                                                        );
                                                         match self.link_index.resolve_target(&target) {
                                                             LinkResolution::Resolved(id) => self.open_note(id),
                                                             LinkResolution::Missing => self.create_note_from_link(&target),
@@ -4738,6 +5032,7 @@ impl eframe::App for WidgetApp {
             &self.data.notes,
             &self.storage_paths.notes_dir,
         ) {
+            analytics_events.push(AnalyticsFeature::CommandPaletteUsed);
             match result {
                 CommandPaletteResult::Action(action) => self.handle_command_action(action),
                 CommandPaletteResult::OpenNote(id) => {
@@ -4757,11 +5052,30 @@ impl eframe::App for WidgetApp {
             self.apply_quick_capture(submission);
         }
 
+        for feature in analytics_events {
+            self.record_analytics(feature);
+        }
+
+        self.show_analytics_consent(&ctx);
+        if self.analytics_details_open {
+            let mut open = true;
+            egui::Window::new("Analytics data")
+                .id(egui::Id::new("analytics_data_details"))
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(true)
+                .default_size(egui::vec2(520.0, 320.0))
+                .show(&ctx, Self::show_analytics_data_description);
+            self.analytics_details_open = open;
+        }
+
         self.save_after_debounce(&ctx);
         self.sync_external_changes(&ctx);
+        self.process_analytics(&ctx);
     }
 
     fn on_exit(&mut self) {
         self.flush_dirty_notes();
+        self.save_settings();
     }
 }

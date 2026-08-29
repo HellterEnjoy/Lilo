@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.1 — Transparent Analytics
+
+- added explicit first-run consent for optional, privacy-preserving usage analytics;
+- added a Settings control that disables analytics and queues deletion of previously collected installation rows;
+- restricted usage reporting to a public whitelist of aggregate daily feature counters;
+- kept note contents, titles, paths, tags, search queries and device information out of analytics payloads;
+- moved HTTPS delivery to a bounded background worker so unavailable analytics cannot delay the editor or application startup;
+- added a Cloudflare Worker and D1 schema with strict validation, prepared statements, 90-day installation-row retention and no public read endpoint;
+- added a protected GitHub Actions collector that archives the repository's rolling Traffic API data without publishing it in the repository;
+- documented collection, consent, retention, processing and deletion in `PRIVACY.md`.
+
 ## 0.2.0 — Knowledge Workflow
 
 > [!WARNING]
