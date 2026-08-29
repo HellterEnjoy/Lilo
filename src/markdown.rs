@@ -39,6 +39,7 @@ struct CachedLayout {
 
 /// Shows one live Markdown editor. `id` owns its cursor and undo state.
 pub fn show_editor(ui: &mut Ui, text: &mut String, id: Id, body_size: f32) -> TextEditOutput {
+    let editor_width = ui.available_width();
     let active_line = ui
         .memory(|memory| memory.has_focus(id))
         .then(|| TextEditState::load(ui.ctx(), id))
@@ -81,7 +82,7 @@ pub fn show_editor(ui: &mut Ui, text: &mut String, id: Id, body_size: f32) -> Te
     let output = TextEdit::multiline(text)
         .id(id)
         .frame(eframe::egui::Frame::NONE)
-        .desired_width(f32::INFINITY)
+        .desired_width(editor_width)
         .desired_rows(20)
         .hint_text("Enter Markdown here...")
         .layouter(&mut layouter)
