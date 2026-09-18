@@ -5,7 +5,9 @@ use crate::storage::{GraphNodeOffset, Note};
 use eframe::egui::{self, Color32, FontId, Pos2, Sense, Stroke, Ui, Vec2};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::f32::consts::TAU;
+use std::hash::{Hash, Hasher};
 use std::path::Path;
+use std::sync::Arc;
 use uuid::Uuid;
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -27,6 +29,7 @@ pub struct GraphState {
     zoom: f32,
     node_offsets: HashMap<(GraphScope, Uuid), Vec2>,
     dragged_node_id: Option<Uuid>,
+    selection_cache: Option<(u64, Arc<GraphSelection>)>,
 }
 
 impl GraphState {
@@ -78,6 +81,7 @@ impl Default for GraphState {
             zoom: 1.0,
             node_offsets: HashMap::new(),
             dragged_node_id: None,
+            selection_cache: None,
         }
     }
 }
@@ -88,6 +92,7 @@ pub struct GraphOutput {
     pub create_missing_target: Option<String>,
     pub state_changed: bool,
     pub persist_layout: bool,
+    pub expand: bool,
 }
 
 struct GraphSelection {
@@ -107,13 +112,15 @@ pub fn show(
     selected_folder: &Path,
 ) -> GraphOutput {
     let mut scope_changed = false;
+    let mut fit = false;
+    let mut expand = false;
     let mut state_changed = false;
     let mut persist_layout = false;
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         for (scope, label) in [
             (GraphScope::Local, "Local"),
             (GraphScope::Folder, "Folder"),
-            (GraphScope::Global, "Global"),
+            (GraphScope::Global, "Vault"),
         ] {
             if ui.selectable_label(state.scope == scope, label).clicked() {
                 state.scope = scope;
@@ -124,6 +131,20 @@ pub fn show(
         }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .small_button("Full view")
+                .on_hover_text("Toggle graph workspace without side panels")
+                .clicked()
+            {
+                expand = true;
+            }
+            if ui
+                .small_button("Fit")
+                .on_hover_text("Fit visible nodes without changing their positions")
+                .clicked()
+            {
+                fit = true;
+            }
             if ui.small_button("Reset").clicked() {
                 state.pan = Vec2::ZERO;
                 state.zoom = 1.0;
@@ -134,6 +155,12 @@ pub fn show(
                 state_changed = true;
                 persist_layout = true;
             }
+            if ui.small_button("+").on_hover_text("Zoom in").clicked() {
+                state.zoom = (state.zoom * 1.2).min(2.5);
+            }
+            if ui.small_button("−").on_hover_text("Zoom out").clicked() {
+                state.zoom = (state.zoom / 1.2).max(0.35);
+            }
             ui.small(format!("{}%", (state.zoom * 100.0).round()));
         });
     });
@@ -143,8 +170,8 @@ pub fn show(
         state.dragged_node_id = None;
     }
     ui.horizontal_wrapped(|ui| {
-        ui.colored_label(Color32::from_rgb(35, 155, 255), "● current");
-        ui.colored_label(Color32::from_rgb(180, 105, 240), "● linked");
+        ui.colored_label(ui.visuals().hyperlink_color, "● current");
+        ui.colored_label(ui.visuals().hyperlink_color, "● linked");
         ui.colored_label(Color32::from_gray(80), "● external");
         ui.colored_label(Color32::from_gray(125), "◌ missing");
     });
@@ -167,14 +194,36 @@ pub fn show(
         });
     });
 
-    let selection = select_graph(
-        state,
-        notes,
-        links,
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (
+        links.generation(),
         selected_note_id,
         notes_root,
         selected_folder,
-    );
+        state.scope,
+        &state.filter,
+        &state.tag_filter,
+        state.show_external,
+        state.max_nodes,
+    )
+        .hash(&mut hasher);
+    let key = hasher.finish();
+    let selection = if let Some((cached_key, selection)) = &state.selection_cache
+        && *cached_key == key
+    {
+        Arc::clone(selection)
+    } else {
+        let selection = Arc::new(select_graph(
+            state,
+            notes,
+            links,
+            selected_note_id,
+            notes_root,
+            selected_folder,
+        ));
+        state.selection_cache = Some((key, Arc::clone(&selection)));
+        selection
+    };
     let note_by_id: HashMap<Uuid, &Note> = notes.iter().map(|note| (note.id, note)).collect();
 
     let canvas_size = ui.available_size().max(Vec2::new(80.0, 80.0));
@@ -202,6 +251,7 @@ pub fn show(
             ui.visuals().weak_text_color(),
         );
         return GraphOutput {
+            expand,
             state_changed,
             persist_layout,
             ..Default::default()
@@ -209,6 +259,22 @@ pub fn show(
     }
 
     let world_positions = layout_positions(&selection);
+    if fit {
+        let mut bounds = egui::Rect::NOTHING;
+        for (id, pos) in &world_positions {
+            bounds.extend_with(
+                *pos + state
+                    .node_offsets
+                    .get(&(state.scope, *id))
+                    .copied()
+                    .unwrap_or_default(),
+            );
+        }
+        state.zoom = ((response.rect.width() - 80.0) / bounds.width().max(1.0))
+            .min((response.rect.height() - 80.0) / bounds.height().max(1.0))
+            .clamp(0.1, 2.5);
+        state.pan = -bounds.center().to_vec2() * state.zoom;
+    }
     let screen_positions = calculate_screen_positions(
         &selection.node_ids,
         &world_positions,
@@ -277,10 +343,8 @@ pub fn show(
         *degree.entry(*to).or_default() += 1;
         let start = screen_positions.get(from).copied().unwrap_or_default();
         let end = screen_positions.get(to).copied().unwrap_or_default();
-        let color = if Some(*from) == selected_note_id {
-            Color32::from_rgb(45, 155, 255)
-        } else if Some(*to) == selected_note_id {
-            Color32::from_rgb(170, 90, 235)
+        let color = if Some(*from) == selected_note_id || Some(*to) == selected_note_id {
+            ui.visuals().hyperlink_color
         } else {
             Color32::from_gray(75)
         };
@@ -291,7 +355,10 @@ pub fn show(
         } else {
             color.gamma_multiply(0.35)
         };
-        painter.line_segment([start, end], Stroke::new(1.2, color));
+        painter.line_segment(
+            [start, end],
+            Stroke::new(if connected_to_selection { 1.8 } else { 1.0 }, color),
+        );
         paint_arrow(&painter, start, end, color);
     }
 
@@ -305,11 +372,11 @@ pub fn show(
             node_radius(*id, selected_note_id) + if hovered || dragging { 1.5 } else { 0.0 };
         let connected = selected || direct_neighbors.contains(id);
         let fill = if selected {
-            Color32::from_rgb(35, 155, 255)
+            ui.visuals().hyperlink_color
         } else if external {
             Color32::from_gray(80)
         } else if connected || hovered || dragging {
-            Color32::from_rgb(180, 105, 240)
+            ui.visuals().hyperlink_color
         } else {
             Color32::from_gray(155)
         };
@@ -335,7 +402,11 @@ pub fn show(
             );
         }
 
-        if (selected || hovered || dragging || degree.get(id).copied().unwrap_or(0) >= 4)
+        if (selection.node_ids.len() <= 30
+            || selected
+            || hovered
+            || dragging
+            || degree.get(id).copied().unwrap_or(0) >= 4)
             && state.show_labels
             && let Some(note) = note_by_id.get(id)
         {
@@ -424,6 +495,7 @@ pub fn show(
     );
 
     GraphOutput {
+        expand,
         state_changed,
         persist_layout,
         ..Default::default()

@@ -8,9 +8,9 @@ use eframe::egui::{
 pub const TOP_BAR_HEIGHT: f32 = 42.0;
 pub const BOTTOM_BAR_HEIGHT: f32 = 28.0;
 pub const TOOL_SIZE: f32 = 30.0;
-pub const PANEL_MARGIN: i8 = 10;
+pub const PANEL_MARGIN: i8 = 12;
 pub const COMPACT_WIDTH: f32 = 600.0;
-pub const WIDE_BREAKPOINT: f32 = 860.0;
+pub const WIDE_BREAKPOINT: f32 = 1100.0;
 #[allow(dead_code)]
 pub const EDITOR_SHEET_MAX_WIDTH: f32 = 780.0;
 
@@ -26,6 +26,8 @@ pub const INSPECTOR_PANEL_WIDTH: f32 = 250.0;
 #[derive(Clone, Copy)]
 #[allow(dead_code)]
 pub enum Icon {
+    Search,
+    Pin,
     Editor,
     Notes,
     Graph,
@@ -49,25 +51,25 @@ pub enum Icon {
 
 pub fn layer0_color(dark: bool) -> Color32 {
     if dark {
-        Color32::from_rgb(13, 15, 20) // Deep dark space (#0d0f14)
+        Color32::from_rgb(15, 17, 23) // Deep dark space (#0d0f14)
     } else {
-        Color32::from_rgb(238, 240, 245)
+        Color32::from_rgb(247, 243, 236)
     }
 }
 
 pub fn layer1_color(dark: bool) -> Color32 {
     if dark {
-        Color32::from_rgb(20, 23, 31) // Matte sidebar/bar (#14171f)
+        Color32::from_rgb(21, 24, 33) // Matte sidebar/bar (#14171f)
     } else {
-        Color32::from_rgb(247, 248, 251)
+        Color32::from_rgb(239, 233, 223)
     }
 }
 
 pub fn layer2_color(dark: bool) -> Color32 {
     if dark {
-        Color32::from_rgb(27, 31, 42) // Elevated editor sheet / modal (#1b1f2a)
+        Color32::from_rgb(28, 32, 43) // Elevated editor sheet / modal (#1b1f2a)
     } else {
-        Color32::WHITE
+        Color32::from_rgb(255, 252, 246)
     }
 }
 
@@ -77,6 +79,41 @@ fn paint_icon(ui: &Ui, rect: Rect, icon: Icon, color: Color32) {
     let stroke = Stroke::new(1.6, color);
     let r = 7.0;
     match icon {
+        Icon::Search => {
+            painter.circle_stroke(center + Vec2::new(-2.0, -2.0), 5.0, stroke);
+            painter.line_segment(
+                [center + Vec2::new(2.0, 2.0), center + Vec2::new(7.0, 7.0)],
+                stroke,
+            );
+        }
+        Icon::Pin => {
+            painter.line_segment(
+                [
+                    center + Vec2::new(-4.0, -7.0),
+                    center + Vec2::new(4.0, -7.0),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    center + Vec2::new(-3.0, -7.0),
+                    center + Vec2::new(-3.0, 0.0),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [center + Vec2::new(3.0, -7.0), center + Vec2::new(3.0, 0.0)],
+                stroke,
+            );
+            painter.line_segment(
+                [center + Vec2::new(-6.0, 1.0), center + Vec2::new(6.0, 1.0)],
+                stroke,
+            );
+            painter.line_segment(
+                [center + Vec2::new(0.0, 1.0), center + Vec2::new(0.0, 8.0)],
+                stroke,
+            );
+        }
         Icon::Editor => {
             painter.line_segment(
                 [center + Vec2::new(-5.0, 5.0), center + Vec2::new(5.0, -5.0)],
@@ -381,6 +418,14 @@ fn painted_button(
         TOOL_SIZE,
     );
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::SelectableLabel,
+            ui.is_enabled(),
+            selected,
+            label,
+        )
+    });
     let visuals = ui.style().interact_selectable(&response, selected);
     if ui.is_rect_visible(rect) {
         ui.painter().rect(
@@ -391,7 +436,11 @@ fn painted_button(
             } else {
                 visuals.weak_bg_fill
             },
-            visuals.bg_stroke,
+            if response.has_focus() {
+                Stroke::new(2.0, ui.visuals().hyperlink_color)
+            } else {
+                Stroke::NONE
+            },
             StrokeKind::Inside,
         );
         let icon_center = if expanded {
@@ -439,16 +488,16 @@ pub fn apply_theme(ctx: &egui::Context, dark: bool, accent: Color32, ui_font_siz
 
     let (hover, border, text, muted) = if dark {
         (
-            Color32::from_rgb(38, 44, 58),
+            Color32::from_rgb(44, 49, 65),
             Color32::from_rgb(36, 41, 54),
-            Color32::from_rgb(235, 238, 245),
-            Color32::from_rgb(140, 148, 165),
+            Color32::from_rgb(241, 242, 246),
+            Color32::from_rgb(169, 173, 188),
         )
     } else {
         (
-            Color32::from_rgb(228, 232, 240),
-            Color32::from_rgb(218, 223, 232),
-            Color32::from_rgb(24, 28, 36),
+            Color32::from_rgb(232, 224, 213),
+            Color32::from_rgb(216, 207, 195),
+            Color32::from_rgb(36, 35, 42),
             Color32::from_rgb(105, 112, 128),
         )
     };
@@ -461,6 +510,15 @@ pub fn apply_theme(ctx: &egui::Context, dark: bool, accent: Color32, ui_font_siz
     visuals.code_bg_color = hover.gamma_multiply(0.65);
     visuals.override_text_color = Some(text);
     visuals.weak_text_color = Some(muted);
+    let accent = if dark {
+        accent
+    } else {
+        Color32::from_rgb(
+            (accent.r() as f32 * 0.72) as u8,
+            (accent.g() as f32 * 0.72) as u8,
+            (accent.b() as f32 * 0.72) as u8,
+        )
+    };
     visuals.hyperlink_color = accent;
     visuals.selection.bg_fill = accent.gamma_multiply(0.45);
     visuals.selection.stroke = Stroke::new(1.0, accent);
@@ -472,7 +530,7 @@ pub fn apply_theme(ctx: &egui::Context, dark: bool, accent: Color32, ui_font_siz
     visuals.widgets.noninteractive.corner_radius = CornerRadius::same(7);
     visuals.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
     visuals.widgets.inactive.bg_fill = layer1;
-    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, border);
+    visuals.widgets.inactive.bg_stroke = Stroke::NONE;
     visuals.widgets.inactive.corner_radius = CornerRadius::same(7);
     visuals.widgets.hovered.weak_bg_fill = hover;
     visuals.widgets.hovered.bg_fill = hover;
@@ -487,8 +545,8 @@ pub fn apply_theme(ctx: &egui::Context, dark: bool, accent: Color32, ui_font_siz
     visuals.widgets.open.bg_stroke = Stroke::new(1.0, accent.gamma_multiply(0.75));
     visuals.widgets.open.corner_radius = CornerRadius::same(7);
 
-    style.spacing.item_spacing = Vec2::new(7.0, 6.0);
-    style.spacing.button_padding = Vec2::new(9.0, 5.0);
+    style.spacing.item_spacing = Vec2::new(8.0, 8.0);
+    style.spacing.button_padding = Vec2::new(12.0, 6.0);
     style.spacing.interact_size = Vec2::new(36.0, 30.0);
     style.spacing.window_margin = egui::Margin::same(PANEL_MARGIN);
     style.visuals = visuals;
@@ -677,31 +735,6 @@ pub fn sheet_frame(ui: &Ui) -> egui::Frame {
         })
 }
 
-pub fn pill_frame(ui: &Ui, selected: bool) -> egui::Frame {
-    let fill = if selected {
-        ui.visuals().selection.bg_fill
-    } else {
-        ui.visuals().faint_bg_color
-    };
-    egui::Frame::new()
-        .fill(fill)
-        .stroke(Stroke::new(
-            1.0,
-            if selected {
-                ui.visuals().hyperlink_color
-            } else {
-                ui.visuals()
-                    .widgets
-                    .inactive
-                    .bg_stroke
-                    .color
-                    .gamma_multiply(0.5)
-            },
-        ))
-        .corner_radius(CornerRadius::same(12))
-        .inner_margin(egui::Margin::symmetric(8, 4))
-}
-
 pub fn paint_resize_grip(ui: &mut Ui) {
     let rect = ui.available_rect_before_wrap();
     let br = rect.max;
@@ -726,11 +759,109 @@ pub fn muted(ui: &mut Ui, text: impl Into<String>) -> Response {
     )
 }
 
+pub fn modal_frame(ctx: &egui::Context) -> egui::Frame {
+    let visuals = ctx.style_of(ctx.theme()).visuals.clone();
+    egui::Frame::new()
+        .fill(visuals.window_fill)
+        .stroke(visuals.window_stroke)
+        .corner_radius(8)
+        .inner_margin(egui::Margin::same(16))
+}
+
+pub fn primary_button(ui: &mut Ui, label: &str) -> Response {
+    let fill = ui.visuals().hyperlink_color;
+    let luminance = 0.2126 * fill.r() as f32 + 0.7152 * fill.g() as f32 + 0.0722 * fill.b() as f32;
+    let foreground = if luminance > 145.0 {
+        Color32::from_rgb(15, 17, 23)
+    } else {
+        Color32::WHITE
+    };
+    ui.add(
+        egui::Button::new(RichText::new(label).color(foreground))
+            .fill(fill)
+            .min_size(Vec2::new(80.0, 32.0)),
+    )
+}
+
+/// Match against folded text while retaining original UTF-8 character boundaries.
+pub fn highlighted_terms(
+    ui: &Ui,
+    text: &str,
+    terms: &[&str],
+    size: f32,
+    muted: bool,
+) -> egui::text::LayoutJob {
+    let mut folded = String::new();
+    let mut source_ranges = Vec::new();
+    for (start, character) in text.char_indices() {
+        let end = start + character.len_utf8();
+        let lower = character.to_lowercase().collect::<String>();
+        source_ranges.extend(std::iter::repeat_n((start, end), lower.len()));
+        folded.push_str(&lower);
+    }
+    let mut matched = vec![false; text.len()];
+    for term in terms.iter().filter(|term| !term.is_empty()) {
+        for (start, value) in folded.match_indices(&term.to_lowercase()) {
+            if let (Some(&(from, _)), Some(&(_, to))) = (
+                source_ranges.get(start),
+                source_ranges.get(start + value.len() - 1),
+            ) {
+                matched[from..to].fill(true);
+            }
+        }
+    }
+    let mut job = egui::text::LayoutJob::default();
+    let base = if muted {
+        ui.visuals().weak_text_color()
+    } else {
+        ui.visuals().text_color()
+    };
+    for (start, character) in text.char_indices() {
+        job.append(
+            &character.to_string(),
+            0.0,
+            egui::TextFormat {
+                font_id: FontId::proportional(size),
+                color: if matched[start] {
+                    ui.visuals().hyperlink_color
+                } else {
+                    base
+                },
+                ..Default::default()
+            },
+        );
+    }
+    job
+}
+
 #[allow(dead_code)]
 pub fn status_color(visuals: &egui::Visuals, is_error: bool) -> Color32 {
     if is_error {
         visuals.error_fg_color
     } else {
         visuals.hyperlink_color
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundled_fonts_and_shared_controls_support_cyrillic_in_both_themes() {
+        let ctx = egui::Context::default();
+        for dark in [true, false] {
+            apply_theme(&ctx, dark, Color32::from_rgb(155, 124, 255), 14.0);
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                assert!(ui.fonts_mut(|fonts| {
+                    fonts.has_glyphs(&FontId::proportional(16.0), "Привет Україна Ёжик")
+                }));
+                let text = "Привет мир — İstanbul";
+                assert_eq!(highlighted_terms(ui, text, &["мир"], 13.0, true).text, text);
+                navigation_button(ui, Icon::Notes, true, "Заметки", true);
+            });
+            assert!(!output.shapes.is_empty());
+            output.textures_delta.clear();
+        }
     }
 }

@@ -11,7 +11,8 @@ use uuid::Uuid;
 
 pub type StorageResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
-const SETTINGS_VERSION: u32 = 8;
+const SETTINGS_VERSION: u32 = 10;
+const ROOT_VAULT_LAYOUT_VERSION: u32 = 9;
 pub const MIN_AUTOSAVE_INTERVAL_SECONDS: u64 = 15;
 pub const MAX_AUTOSAVE_INTERVAL_SECONDS: u64 = 10 * 60;
 pub const DEFAULT_AUTOSAVE_INTERVAL_SECONDS: u64 = 30;
@@ -49,6 +50,38 @@ pub enum QuickCaptureTarget {
     Inbox,
     NewNote,
     CustomNote(String),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VaultLayout {
+    /// Current layout: Markdown files live directly in the selected vault root.
+    #[default]
+    Root,
+    /// Compatibility layout used by Lilo 0.2.1 and earlier.
+    LegacyNotesDirectory,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultEntry {
+    pub path: PathBuf,
+    pub layout: VaultLayout,
+    pub selected_note_id: Option<Uuid>,
+    pub selected_folder: PathBuf,
+    pub collapsed_folders: Vec<PathBuf>,
+    pub recent_note_ids: Vec<Uuid>,
+}
+
+impl VaultEntry {
+    pub fn name(&self) -> String {
+        vault_name(&self.path)
+    }
+}
+
+pub fn vault_name(path: &Path) -> String {
+    path.file_name()
+        .filter(|name| !name.is_empty())
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -216,6 +249,8 @@ impl AppData {
 pub struct AppSettings {
     pub version: u32,
     pub vault_path: PathBuf,
+    pub vault_layout: VaultLayout,
+    pub vaults: Vec<VaultEntry>,
     pub selected_note_id: Option<Uuid>,
     pub legacy_migration_completed: bool,
     pub selected_folder: PathBuf,
@@ -230,6 +265,7 @@ pub struct AppSettings {
     pub show_status_bar: bool,
     pub editor_font_size: f32,
     pub ui_font_size: f32,
+    pub compact_density: bool,
     pub sidebar_width: f32,
     pub zen_mode: bool,
     pub daily_notes_folder: PathBuf,
@@ -276,6 +312,8 @@ impl Default for AppSettings {
         Self {
             version: SETTINGS_VERSION,
             vault_path: PathBuf::new(),
+            vault_layout: VaultLayout::Root,
+            vaults: Vec::new(),
             selected_note_id: None,
             legacy_migration_completed: true,
             selected_folder: PathBuf::new(),
@@ -288,8 +326,9 @@ impl Default for AppSettings {
             editor_max_width: 780.0,
             typewriter_mode: false,
             show_status_bar: true,
-            editor_font_size: 14.0,
-            ui_font_size: 13.0,
+            editor_font_size: 16.0,
+            ui_font_size: 14.0,
+            compact_density: false,
             sidebar_width: 260.0,
             zen_mode: false,
             daily_notes_folder: PathBuf::from("Daily"),
@@ -318,7 +357,7 @@ impl Default for AppSettings {
             ],
             tag_browser_expanded: true,
             saved_searches_expanded: true,
-            accent_rgb: [129, 140, 248],
+            accent_rgb: [155, 124, 255],
             always_on_top: true,
             autostart: false,
             shortcuts: ShortcutSettings::default(),
@@ -336,8 +375,66 @@ impl Default for AppSettings {
     }
 }
 
+impl AppSettings {
+    pub fn remember_active_vault(&mut self) {
+        if self.vault_path.as_os_str().is_empty() {
+            return;
+        }
+        let entry = VaultEntry {
+            path: self.vault_path.clone(),
+            layout: self.vault_layout,
+            selected_note_id: self.selected_note_id,
+            selected_folder: self.selected_folder.clone(),
+            collapsed_folders: self.collapsed_folders.clone(),
+            recent_note_ids: self.recent_note_ids.clone(),
+        };
+        if let Some(existing) = self
+            .vaults
+            .iter_mut()
+            .find(|vault| vault.path == entry.path)
+        {
+            *existing = entry;
+        } else {
+            self.vaults.insert(0, entry);
+        }
+    }
+
+    fn activate_vault(&mut self, path: PathBuf, layout: VaultLayout) {
+        self.remember_active_vault();
+        let saved = self
+            .vaults
+            .iter()
+            .position(|vault| vault.path == path)
+            .map(|index| self.vaults.remove(index));
+        self.vault_path = path;
+        self.vault_layout = saved.as_ref().map_or(layout, |vault| vault.layout);
+        self.selected_note_id = saved.as_ref().and_then(|vault| vault.selected_note_id);
+        self.selected_folder = saved
+            .as_ref()
+            .map_or_else(PathBuf::new, |vault| vault.selected_folder.clone());
+        self.collapsed_folders = saved
+            .as_ref()
+            .map_or_else(Vec::new, |vault| vault.collapsed_folders.clone());
+        self.recent_note_ids = saved
+            .as_ref()
+            .map_or_else(Vec::new, |vault| vault.recent_note_ids.clone());
+        self.vaults.insert(
+            0,
+            VaultEntry {
+                path: self.vault_path.clone(),
+                layout: self.vault_layout,
+                selected_note_id: self.selected_note_id,
+                selected_folder: self.selected_folder.clone(),
+                collapsed_folders: self.collapsed_folders.clone(),
+                recent_note_ids: self.recent_note_ids.clone(),
+            },
+        );
+    }
+}
+
 pub struct StoragePaths {
     pub settings_path: PathBuf,
+    pub vault_root: PathBuf,
     pub notes_dir: PathBuf,
     pub trash_dir: PathBuf,
     pub backups_dir: PathBuf,
@@ -357,46 +454,30 @@ pub struct LoadedStorage {
 pub fn load_storage() -> StorageResult<LoadedStorage> {
     let project_dirs = ProjectDirs::from("com", "HellterEnjoy", "Lilo")
         .ok_or_else(|| io::Error::other("Failed to resolve application directories"))?;
-    let config_dir = project_dirs.config_dir().to_path_buf();
+    // An explicit data directory enables portable storage and isolated UI review.
+    let portable = std::env::var_os("LILO_DATA_DIR").map(PathBuf::from);
+    if portable.as_ref().is_some_and(|path| !path.is_absolute()) {
+        return Err(io::Error::other("LILO_DATA_DIR must be an absolute path").into());
+    }
+    let config_dir = portable
+        .clone()
+        .unwrap_or_else(|| project_dirs.config_dir().to_path_buf());
+    let cache_dir = portable.as_ref().map_or_else(
+        || project_dirs.cache_dir().to_path_buf(),
+        |path| path.join("cache"),
+    );
     fs::create_dir_all(&config_dir)?;
-
-    let cache_dir = project_dirs.cache_dir().to_path_buf();
     fs::create_dir_all(&cache_dir)?;
-
     let settings_path = config_dir.join("settings.json");
-    let default_vault_path = default_vault_path(&config_dir);
+    let default_vault_path = portable.as_ref().map_or_else(
+        || default_vault_path(&config_dir),
+        |path| path.join("Vault"),
+    );
     let mut settings = load_settings(&settings_path)?;
-    if settings.vault_path.as_os_str().is_empty() {
-        settings.vault_path = default_vault_path;
-    }
-    settings.version = SETTINGS_VERSION;
+    migrate_settings(&mut settings, &default_vault_path);
 
-    if settings.editor_font_size == 0.0 {
-        settings.editor_font_size = if settings.font_size > 0.0 {
-            settings.font_size
-        } else {
-            14.0
-        };
-    }
-    if settings.font_size == 0.0 {
-        settings.font_size = settings.editor_font_size;
-    }
-    if settings.ui_font_size == 0.0 {
-        settings.ui_font_size = 13.0;
-    }
-    if settings.sidebar_width == 0.0 {
-        settings.sidebar_width = 220.0;
-    }
-    settings.autosave_interval_seconds = settings
-        .autosave_interval_seconds
-        .clamp(MIN_AUTOSAVE_INTERVAL_SECONDS, MAX_AUTOSAVE_INTERVAL_SECONDS);
-    if settings.daily_note_format.trim().is_empty() {
-        settings.daily_note_format = "%Y-%m-%d".to_owned();
-    }
-
-    let notes_dir = settings.vault_path.join("Notes");
-    let trash_dir = settings.vault_path.join("Trash");
-    let backups_dir = settings.vault_path.join("Backups");
+    let vault_root = settings.vault_path.clone();
+    let (notes_dir, trash_dir, backups_dir) = vault_directories(&vault_root, settings.vault_layout);
     let templates_dir = if settings.templates_folder.as_os_str().is_empty() {
         notes_dir.join("Templates")
     } else {
@@ -430,8 +511,7 @@ pub fn load_storage() -> StorageResult<LoadedStorage> {
     let _ = fs::write(vault_lilo.join(".gitignore"), "*\n");
 
     let excluded_directories = managed_note_exclusions(&notes_dir, &settings);
-    let (mut notes, warnings, folder_paths) =
-        load_notes_excluding(&notes_dir, &excluded_directories)?;
+    let (notes, warnings, folder_paths) = load_notes_excluding(&notes_dir, &excluded_directories)?;
 
     settings.legacy_migration_completed = true;
     if !is_safe_relative_path(&settings.selected_folder)
@@ -443,18 +523,13 @@ pub fn load_storage() -> StorageResult<LoadedStorage> {
         .collapsed_folders
         .retain(|path| is_safe_relative_path(path) && folder_paths.contains(path));
 
-    if notes.is_empty() {
-        let note = Note::new(&notes_dir);
-        save_note(&note)?;
-        notes.push(note);
-    }
-
     let mut data = AppData {
         notes,
         selected_note_id: settings.selected_note_id,
     };
     data.normalize_selection();
     settings.selected_note_id = data.selected_note_id;
+    settings.remember_active_vault();
     save_settings(&settings_path, &settings)?;
 
     Ok(LoadedStorage {
@@ -462,6 +537,7 @@ pub fn load_storage() -> StorageResult<LoadedStorage> {
         settings,
         paths: StoragePaths {
             settings_path,
+            vault_root,
             notes_dir,
             trash_dir,
             backups_dir,
@@ -472,13 +548,70 @@ pub fn load_storage() -> StorageResult<LoadedStorage> {
     })
 }
 
+fn migrate_settings(settings: &mut AppSettings, default_vault_path: &Path) {
+    let loaded_settings_version = settings.version;
+    if settings.vault_path.as_os_str().is_empty() {
+        settings.vault_path = default_vault_path.to_path_buf();
+    }
+    if loaded_settings_version < ROOT_VAULT_LAYOUT_VERSION {
+        settings.vault_layout = VaultLayout::LegacyNotesDirectory;
+    }
+    settings.version = SETTINGS_VERSION;
+    settings.remember_active_vault();
+
+    if settings.editor_font_size == 0.0 {
+        settings.editor_font_size = if settings.font_size > 0.0 {
+            settings.font_size
+        } else {
+            14.0
+        };
+    }
+    if settings.font_size == 0.0 {
+        settings.font_size = settings.editor_font_size;
+    }
+    if settings.ui_font_size == 0.0 {
+        settings.ui_font_size = 13.0;
+    }
+    if settings.sidebar_width == 0.0 {
+        settings.sidebar_width = 220.0;
+    }
+    settings.autosave_interval_seconds = settings
+        .autosave_interval_seconds
+        .clamp(MIN_AUTOSAVE_INTERVAL_SECONDS, MAX_AUTOSAVE_INTERVAL_SECONDS);
+    if settings.daily_note_format.trim().is_empty() {
+        settings.daily_note_format = "%Y-%m-%d".to_owned();
+    }
+}
+
+fn vault_directories(root: &Path, layout: VaultLayout) -> (PathBuf, PathBuf, PathBuf) {
+    match layout {
+        VaultLayout::Root => (
+            root.to_path_buf(),
+            root.join(".lilo/Trash"),
+            root.join(".lilo/Backups"),
+        ),
+        VaultLayout::LegacyNotesDirectory => {
+            (root.join("Notes"), root.join("Trash"), root.join("Backups"))
+        }
+    }
+}
+
 pub fn save_settings(path: &Path, settings: &AppSettings) -> StorageResult<()> {
-    let json = serde_json::to_string_pretty(settings)?;
+    let mut saved = settings.clone();
+    saved.remember_active_vault();
+    let json = serde_json::to_string_pretty(&saved)?;
     atomic_write(path, json.as_bytes())?;
     Ok(())
 }
 
 pub fn save_note(note: &Note) -> StorageResult<()> {
+    if note.file_path.exists() && fs::metadata(&note.file_path)?.permissions().readonly() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{} is read-only", note.file_path.display()),
+        )
+        .into());
+    }
     if let Some(parent) = note.file_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -520,6 +653,48 @@ pub fn save_note_with_backup(
         prune_backups(backups_dir, note.id, backup_limit)?;
     }
     save_note(note)
+}
+
+#[derive(Debug)]
+pub struct NoteSaveFailure {
+    pub note_id: Uuid,
+    pub title: String,
+    pub path: PathBuf,
+    pub error: String,
+}
+
+#[derive(Debug, Default)]
+pub struct BatchSaveReport {
+    pub saved_note_ids: Vec<Uuid>,
+    pub failures: Vec<NoteSaveFailure>,
+}
+
+/// Saves every requested note independently so one inaccessible file cannot hide successful writes.
+pub fn save_notes_with_report(
+    notes: &[Note],
+    note_ids: &HashSet<Uuid>,
+    backups_dir: &Path,
+    backups_enabled: bool,
+    backup_limit: usize,
+) -> BatchSaveReport {
+    let mut report = BatchSaveReport::default();
+    for note in notes.iter().filter(|note| note_ids.contains(&note.id)) {
+        let result = if backups_enabled {
+            save_note_with_backup(note, backups_dir, backup_limit)
+        } else {
+            save_note(note)
+        };
+        match result {
+            Ok(()) => report.saved_note_ids.push(note.id),
+            Err(error) => report.failures.push(NoteSaveFailure {
+                note_id: note.id,
+                title: display_note_title(note).to_owned(),
+                path: note.file_path.clone(),
+                error: error.to_string(),
+            }),
+        }
+    }
+    report
 }
 
 pub fn move_note_to_trash(note: &Note, paths: &StoragePaths) -> StorageResult<()> {
@@ -692,13 +867,20 @@ pub fn delete_empty_folder(notes_dir: &Path, relative: &Path) -> StorageResult<(
     Ok(())
 }
 
-/// Safely deletes a folder by moving any notes inside it to Trash.
+#[derive(Debug, Default)]
+pub struct FolderTrashReport {
+    pub trashed_note_ids: Vec<Uuid>,
+    pub failures: Vec<NoteSaveFailure>,
+    pub retained_files: Vec<PathBuf>,
+}
+
+/// Moves every note to Trash independently and removes only directories left completely empty.
 pub fn delete_folder_with_trash(
     notes_dir: &Path,
     trash_dir: &Path,
     relative: &Path,
     notes: &[Note],
-) -> StorageResult<Vec<Uuid>> {
+) -> StorageResult<FolderTrashReport> {
     if relative.as_os_str().is_empty() || !is_safe_relative_path(relative) {
         return Err(io::Error::other("The Notes root cannot be deleted").into());
     }
@@ -706,10 +888,14 @@ pub fn delete_folder_with_trash(
     if !target.is_dir() {
         return Err(io::Error::new(io::ErrorKind::NotFound, "Folder does not exist").into());
     }
+    if fs::symlink_metadata(&target)?.file_type().is_symlink() {
+        return Err(io::Error::other("Refusing to delete a linked folder").into());
+    }
 
-    let mut trashed_ids = Vec::new();
+    let mut report = FolderTrashReport::default();
     let paths = StoragePaths {
         settings_path: PathBuf::new(),
+        vault_root: notes_dir.to_path_buf(),
         notes_dir: notes_dir.to_path_buf(),
         trash_dir: trash_dir.to_path_buf(),
         backups_dir: PathBuf::new(),
@@ -720,16 +906,57 @@ pub fn delete_folder_with_trash(
         if let Ok(rel) = note.file_path.strip_prefix(notes_dir)
             && rel.starts_with(relative)
         {
-            move_note_to_trash(note, &paths)?;
-            trashed_ids.push(note.id);
+            match move_note_to_trash(note, &paths) {
+                Ok(()) => report.trashed_note_ids.push(note.id),
+                Err(error) => report.failures.push(NoteSaveFailure {
+                    note_id: note.id,
+                    title: display_note_title(note).to_owned(),
+                    path: note.file_path.clone(),
+                    error: error.to_string(),
+                }),
+            }
         }
     }
 
+    remove_empty_directory_tree(&target)?;
     if target.exists() {
-        let _ = fs::remove_dir_all(&target);
+        collect_retained_files(&target, &mut report.retained_files)?;
+        report.retained_files.sort();
     }
 
-    Ok(trashed_ids)
+    Ok(report)
+}
+
+fn remove_empty_directory_tree(directory: &Path) -> StorageResult<()> {
+    if !directory.is_dir() {
+        return Ok(());
+    }
+    let children = fs::read_dir(directory)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    for child in children {
+        if child.is_dir() && !fs::symlink_metadata(&child)?.file_type().is_symlink() {
+            remove_empty_directory_tree(&child)?;
+        }
+    }
+    if fs::read_dir(directory)?.next().transpose()?.is_none() {
+        fs::remove_dir(directory)?;
+    }
+    Ok(())
+}
+
+fn collect_retained_files(directory: &Path, output: &mut Vec<PathBuf>) -> StorageResult<()> {
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() || file_type.is_file() {
+            output.push(entry.path());
+        } else if file_type.is_dir() {
+            collect_retained_files(&entry.path(), output)?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -931,8 +1158,23 @@ pub fn set_vault_path(settings: &mut AppSettings, value: &str) -> StorageResult<
         return Err(io::Error::other("Vault path must be absolute").into());
     }
     fs::create_dir_all(&path)?;
-    settings.vault_path = path;
+    let layout = settings
+        .vaults
+        .iter()
+        .find(|vault| vault.path == path)
+        .map_or_else(|| detect_vault_layout(&path), |vault| vault.layout);
+    settings.activate_vault(path, layout);
     Ok(())
+}
+
+fn detect_vault_layout(path: &Path) -> VaultLayout {
+    let has_legacy_notes = path.join("Notes").is_dir();
+    let has_legacy_recovery = path.join("Trash").is_dir() || path.join("Backups").is_dir();
+    if has_legacy_notes && has_legacy_recovery {
+        VaultLayout::LegacyNotesDirectory
+    } else {
+        VaultLayout::Root
+    }
 }
 
 pub fn import_markdown(
@@ -986,11 +1228,7 @@ pub fn export_vault(paths: &StoragePaths, destination_root: &Path) -> StorageRes
     }
     fs::create_dir_all(destination_root)?;
     let destination_root = destination_root.canonicalize()?;
-    let vault_root = paths
-        .notes_dir
-        .parent()
-        .ok_or_else(|| io::Error::other("Vault has no root directory"))?
-        .canonicalize()?;
+    let vault_root = paths.vault_root.canonicalize()?;
     if destination_root.starts_with(&vault_root) {
         return Err(io::Error::other("Export destination must be outside the active vault").into());
     }
@@ -1001,8 +1239,13 @@ pub fn export_vault(paths: &StoragePaths, destination_root: &Path) -> StorageRes
         return Err(io::Error::new(io::ErrorKind::AlreadyExists, "Export already exists").into());
     }
     fs::create_dir(&destination)?;
-    copy_directory(&paths.notes_dir, &destination.join("Notes"))?;
+    if paths.notes_dir == paths.vault_root {
+        copy_directory_excluding(&paths.notes_dir, &destination.join("Notes"), &[".lilo"])?;
+    } else {
+        copy_directory(&paths.notes_dir, &destination.join("Notes"))?;
+    }
     copy_directory(&paths.trash_dir, &destination.join("Trash"))?;
+    copy_directory(&paths.backups_dir, &destination.join("Backups"))?;
     fs::copy(&paths.settings_path, destination.join("settings.json"))?;
     Ok(destination)
 }
@@ -1012,8 +1255,12 @@ pub fn vault_diagnostics(
     settings: &AppSettings,
 ) -> StorageResult<Vec<String>> {
     let excluded_directories = managed_note_exclusions(&paths.notes_dir, settings);
-    let (_, warnings, _) = load_notes_excluding(&paths.notes_dir, &excluded_directories)?;
+    let (notes, warnings, _) = load_notes_excluding(&paths.notes_dir, &excluded_directories)?;
     let mut diagnostics = warnings;
+    diagnostics.extend(crate::attachments::AttachmentManager::diagnostics(
+        &notes,
+        &paths.notes_dir,
+    ));
     for directory in [&paths.notes_dir, &paths.trash_dir, &paths.backups_dir] {
         if !directory.is_dir() {
             diagnostics.push(format!(
@@ -1040,6 +1287,36 @@ fn copy_directory(source: &Path, destination: &Path) -> StorageResult<()> {
     fs::create_dir_all(destination)?;
     for entry in fs::read_dir(source)? {
         let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        let target = destination.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_directory(&entry.path(), &target)?;
+        } else if file_type.is_file() {
+            fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
+fn copy_directory_excluding(
+    source: &Path,
+    destination: &Path,
+    excluded_names: &[&str],
+) -> StorageResult<()> {
+    fs::create_dir_all(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        if excluded_names.iter().any(|name| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(name)
+        }) {
+            continue;
+        }
         let file_type = entry.file_type()?;
         if file_type.is_symlink() {
             continue;
@@ -1390,6 +1667,7 @@ mod tests {
     fn test_paths(root: &Path) -> StoragePaths {
         let paths = StoragePaths {
             settings_path: root.join("settings.json"),
+            vault_root: root.to_path_buf(),
             notes_dir: root.join("Notes"),
             trash_dir: root.join("Trash"),
             backups_dir: root.join("Backups"),
@@ -1500,6 +1778,7 @@ mod tests {
         let file_name = note.file_path.file_name().expect("note file name");
         let paths = StoragePaths {
             settings_path: temp.path().join("settings.json"),
+            vault_root: temp.path().to_path_buf(),
             notes_dir,
             trash_dir: trash_dir.clone(),
             backups_dir: temp.path().join("Backups"),
@@ -1528,6 +1807,7 @@ mod tests {
         let old_path = note.file_path.clone();
         let paths = StoragePaths {
             settings_path: temp.path().join("settings.json"),
+            vault_root: temp.path().to_path_buf(),
             notes_dir: notes_dir.clone(),
             trash_dir: temp.path().join("Trash"),
             backups_dir: temp.path().join("Backups"),
@@ -1575,10 +1855,31 @@ mod tests {
 
         // Delete with trash moves note to trash
         let (notes, _, _) = load_notes(&notes_dir).expect("reload notes after rename");
-        let trashed = delete_folder_with_trash(&notes_dir, &trash_dir, &renamed, &notes)
+        let report = delete_folder_with_trash(&notes_dir, &trash_dir, &renamed, &notes)
             .expect("delete with trash");
-        assert_eq!(trashed.len(), 1);
+        assert_eq!(report.trashed_note_ids.len(), 1);
+        assert!(report.failures.is_empty());
         assert!(!notes_dir.join(&renamed).exists());
+    }
+
+    #[test]
+    fn folder_trash_never_deletes_unmanaged_files() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let notes_dir = temp.path().join("Notes");
+        let trash_dir = temp.path().join("Trash");
+        let folder =
+            ensure_note_folder(&notes_dir, Path::new("Project")).expect("create project folder");
+        let note = Note::new_named(&folder, "Plan");
+        save_note(&note).expect("save note");
+        fs::write(folder.join("diagram.bin"), b"keep me").expect("write unmanaged file");
+
+        let report =
+            delete_folder_with_trash(&notes_dir, &trash_dir, Path::new("Project"), &[note])
+                .expect("move managed notes");
+
+        assert_eq!(report.trashed_note_ids.len(), 1);
+        assert_eq!(report.retained_files.len(), 1);
+        assert!(folder.join("diagram.bin").exists());
     }
 
     #[test]
@@ -1592,6 +1893,7 @@ mod tests {
         save_note(&note).expect("save note");
         let paths = StoragePaths {
             settings_path: temp.path().join("settings.json"),
+            vault_root: temp.path().to_path_buf(),
             notes_dir: notes_dir.clone(),
             trash_dir,
             backups_dir,
@@ -1747,13 +2049,145 @@ mod tests {
         assert_eq!(settings.shortcuts.graph_overlay, "Ctrl+Shift+G");
         assert_eq!(settings.toolbar_placement, ToolbarPlacement::Auto);
         assert_eq!(settings.floating_toolbar_position, [24.0, 72.0]);
-        assert_eq!(settings.editor_font_size, 14.0);
-        assert_eq!(settings.ui_font_size, 13.0);
+        assert_eq!(settings.editor_font_size, 16.0);
+        assert_eq!(settings.ui_font_size, 14.0);
         assert_eq!(settings.sidebar_width, 260.0);
         assert_eq!(settings.daily_notes_folder, PathBuf::from("Daily"));
         assert_eq!(settings.daily_note_format, "%Y-%m-%d");
         assert_eq!(settings.templates_folder, PathBuf::from("Templates"));
         assert_eq!(settings.quick_capture_target, QuickCaptureTarget::DailyNote);
+    }
+
+    #[test]
+    fn settings_migration_preserves_legacy_vault_layouts() {
+        for version in [2, 7, 8] {
+            let json = format!(r#"{{"version": {version}, "vault_path": "C:/ExistingLiloVault"}}"#);
+            let mut settings: AppSettings = serde_json::from_str(&json).expect("old settings");
+            migrate_settings(&mut settings, Path::new("C:/DefaultVault"));
+            assert_eq!(settings.version, SETTINGS_VERSION);
+            assert_eq!(settings.vault_layout, VaultLayout::LegacyNotesDirectory);
+            assert_eq!(settings.vault_path, PathBuf::from("C:/ExistingLiloVault"));
+        }
+    }
+
+    #[test]
+    fn version_nine_root_vault_stays_root_after_registry_upgrade() {
+        let json = r#"{"version":9,"vault_path":"C:/DirectNotes","vault_layout":"Root"}"#;
+        let mut settings: AppSettings = serde_json::from_str(json).unwrap();
+        migrate_settings(&mut settings, Path::new("C:/DefaultVault"));
+        assert_eq!(settings.vault_layout, VaultLayout::Root);
+        assert_eq!(settings.vaults.len(), 1);
+        assert_eq!(settings.vaults[0].path, settings.vault_path);
+    }
+
+    #[test]
+    fn switching_vaults_restores_each_vaults_navigation_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("Work");
+        let second = temp.path().join("Personal");
+        let mut settings = AppSettings::default();
+        set_vault_path(&mut settings, first.to_string_lossy().as_ref()).unwrap();
+        let note_id = Uuid::new_v4();
+        settings.selected_note_id = Some(note_id);
+        settings.selected_folder = PathBuf::from("Projects");
+        settings.collapsed_folders = vec![PathBuf::from("Archive")];
+        settings.recent_note_ids = vec![note_id];
+
+        set_vault_path(&mut settings, second.to_string_lossy().as_ref()).unwrap();
+        assert_eq!(settings.selected_note_id, None);
+        assert!(settings.selected_folder.as_os_str().is_empty());
+        assert!(settings.recent_note_ids.is_empty());
+        assert_eq!(settings.vaults.len(), 2);
+        assert_eq!(settings.vaults[0].name(), "Personal");
+
+        set_vault_path(&mut settings, first.to_string_lossy().as_ref()).unwrap();
+        assert_eq!(settings.selected_note_id, Some(note_id));
+        assert_eq!(settings.selected_folder, PathBuf::from("Projects"));
+        assert_eq!(settings.collapsed_folders, vec![PathBuf::from("Archive")]);
+        assert_eq!(settings.recent_note_ids, vec![note_id]);
+        assert_eq!(settings.vaults[0].name(), "Work");
+    }
+
+    #[test]
+    fn newly_selected_folder_becomes_the_note_root() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let selected = temp.path().join("Obsidian-style vault");
+        let mut settings = AppSettings::default();
+
+        set_vault_path(&mut settings, selected.to_string_lossy().as_ref())
+            .expect("select root vault");
+
+        assert_eq!(settings.vault_layout, VaultLayout::Root);
+        assert_eq!(settings.vault_path, selected);
+        let (notes, trash, backups) = vault_directories(&selected, settings.vault_layout);
+        assert_eq!(notes, selected);
+        assert_eq!(trash, notes.join(".lilo/Trash"));
+        assert_eq!(backups, notes.join(".lilo/Backups"));
+    }
+
+    #[test]
+    fn selecting_an_existing_lilo_vault_keeps_its_layout() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        fs::create_dir_all(temp.path().join("Notes")).unwrap();
+        fs::create_dir_all(temp.path().join("Backups")).unwrap();
+        let mut settings = AppSettings::default();
+
+        set_vault_path(&mut settings, temp.path().to_string_lossy().as_ref())
+            .expect("select legacy vault");
+
+        assert_eq!(settings.vault_layout, VaultLayout::LegacyNotesDirectory);
+    }
+
+    #[test]
+    fn batch_save_reports_partial_read_only_failure() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let backups = temp.path().join("Backups");
+        let mut writable = Note::new_named(temp.path(), "Writable");
+        let mut read_only = Note::new_named(temp.path(), "Read only");
+        save_note(&writable).unwrap();
+        save_note(&read_only).unwrap();
+        let original_permissions = fs::metadata(&read_only.file_path).unwrap().permissions();
+        let mut permissions = original_permissions.clone();
+        permissions.set_readonly(true);
+        fs::set_permissions(&read_only.file_path, permissions).unwrap();
+        writable.content = "saved".to_owned();
+        read_only.content = "must fail".to_owned();
+        let ids = HashSet::from([writable.id, read_only.id]);
+
+        let report = save_notes_with_report(
+            &[writable.clone(), read_only.clone()],
+            &ids,
+            &backups,
+            true,
+            5,
+        );
+
+        assert_eq!(report.saved_note_ids, vec![writable.id]);
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].note_id, read_only.id);
+        assert!(
+            fs::read_to_string(&writable.file_path)
+                .unwrap()
+                .contains("saved")
+        );
+        assert!(
+            !fs::read_to_string(&read_only.file_path)
+                .unwrap()
+                .contains("must fail")
+        );
+
+        fs::set_permissions(&read_only.file_path, original_permissions).unwrap();
+    }
+
+    #[test]
+    fn interrupted_atomic_write_preserves_original_file() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let path = temp.path().join("settings.json");
+        fs::write(&path, "original").unwrap();
+        fs::create_dir(path.with_extension("lilo-tmp")).unwrap();
+
+        assert!(atomic_write(&path, b"replacement").is_err());
+        assert_eq!(fs::read_to_string(path).unwrap(), "original");
     }
 
     #[test]

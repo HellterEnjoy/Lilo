@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.2.2 — Vault Roots and Adaptive Workspace
+
+- added a native folder picker and made any selected directory the direct root of a new Markdown vault;
+- kept vaults created by Lilo 0.2.1 and earlier on their existing `Notes`, `Trash` and `Backups` layout without automatically moving user files;
+- moved recovery and cache data for new root-style vaults into the hidden `.lilo` directory;
+- added reviewed affected-note previews before vault-wide tag and wiki-link rewrites;
+- made multi-note saving continue after individual failures and report both successful and failed writes;
+- prevented folder deletion from removing attachments or other unmanaged files left inside the folder;
+- extended read-only diagnostics to missing, unsafe and malformed local attachment links;
+- expanded migration, interrupted-write, read-only file and partial-operation regression coverage;
+- clarified the separate purposes of rotating Backups and recoverable Trash;
+- completed the adaptive Lilo interface for compact widget and expanded workspace layouts;
+- added a categorized inspector, responsive explorer, redesigned settings and a focused Quick Capture dialog;
+- made pasted and dropped images appear at their Markdown position inside the live editor;
+- made tags added from Properties refresh the explorer immediately and normalized new tag names;
+- fixed a Unicode boundary panic when checkbox hit-testing ordinary Cyrillic text;
+- removed the legacy movable navigation layer and stale persisted egui layout from the redesigned shell;
+- refreshed the English showcase notes and replaced all four project screenshots;
+- documented the now-live WinGet package `HellterEnjoy.Lilo` and simplified the project documentation.
+
 ## 0.2.1 — Transparent Analytics and Responsiveness
 
 > [!WARNING]

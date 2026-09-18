@@ -304,6 +304,12 @@ pub fn rename_tag_in_vault(notes: &mut [Note], old_tag: &str, new_tag: &str) -> 
     modified_note_ids
 }
 
+/// Calculates the affected notes without changing the live vault state.
+pub fn preview_tag_rename(notes: &[Note], old_tag: &str, new_tag: &str) -> Vec<Uuid> {
+    let mut preview = notes.to_vec();
+    rename_tag_in_vault(&mut preview, old_tag, new_tag)
+}
+
 /// Helper function to replace hashtags in markdown while respecting word boundaries and nested subtags.
 fn replace_hashtag_in_content(content: &str, old_tag: &str, new_hashtag: &str) -> String {
     let mut result = String::with_capacity(content.len());
@@ -411,6 +417,20 @@ mod tests {
         assert_eq!(modified, vec![notes[0].id]);
         assert_eq!(notes[0].tags, vec!["task".to_owned()]);
         assert_eq!(notes[0].content, "Action item with #task here.");
+    }
+
+    #[test]
+    fn tag_rename_preview_does_not_mutate_notes() {
+        let mut original = Note::new(Path::new("."));
+        original.content = "#todo".to_owned();
+        original.tags.push("todo".to_owned());
+        let notes = vec![original];
+
+        let affected = preview_tag_rename(&notes, "todo", "done");
+
+        assert_eq!(affected, vec![notes[0].id]);
+        assert!(notes[0].content.contains("#todo"));
+        assert_eq!(notes[0].tags, vec!["todo"]);
     }
 
     #[test]

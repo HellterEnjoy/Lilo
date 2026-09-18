@@ -1,61 +1,91 @@
-# Lilo release guide
+# Lilo release and recovery guide
 
-## Platform status
+## Supported packages
 
-Windows and Linux x86-64 are published binary platforms. Linux archives are tested on current Arch Linux and Ubuntu 22.04 or newer. Windows and Ubuntu remain mandatory CI targets for ongoing development. macOS integration, release signing and notarisation are not currently claimed.
+Lilo publishes x86-64 builds for Windows, Ubuntu 22.04+ and current Arch Linux. macOS has no official package. Release binaries are currently unsigned.
 
-## Install on Windows
+## Windows installation
 
-Download `Lilo-<version>-windows-x64-setup.exe` from the GitHub release and run it. The installer is per-user and does not require administrator access. The ZIP archive remains available as a portable build. Windows SmartScreen may warn because the binaries are not code-signed.
+Lilo is available from the official WinGet community source as `HellterEnjoy.Lilo`:
 
-WinGet installation is prepared but is not advertised until the initial package has been accepted into the community repository. Once available, the package identifier will be `HellterEnjoy.Lilo`.
+```powershell
+winget install --id HellterEnjoy.Lilo --exact
+```
 
-Lilo creates its default vault as `LiloVault` in the user's Documents directory. The active path is visible and can be changed immediately in **Settings → Storage**.
+Upgrade when a newer catalog version is available:
 
-## Install on Linux
+```powershell
+winget upgrade --id HellterEnjoy.Lilo --exact
+```
 
-1. Download the Ubuntu or Arch `Lilo-<version>-<platform>-x86_64.tar.gz` archive and its `.sha256` file.
-2. Run `sha256sum -c <archive>.sha256` in the download directory.
-3. Extract the complete archive.
-4. Install `Lilo` to a stable user-owned location such as `~/.local/bin/Lilo`.
-5. Launch the installed executable before enabling autostart.
+Check the version currently published by WinGet with:
 
-The Ubuntu artifact requires Ubuntu 22.04 or newer. The Arch artifact targets an up-to-date rolling installation. Both archives contain an unsigned dynamically linked x86-64 executable rather than a native distribution package.
+```powershell
+winget show --id HellterEnjoy.Lilo --exact
+```
 
-## Update
+The WinGet catalog can lag behind a new GitHub release. [GitHub Releases](https://github.com/HellterEnjoy/Lilo/releases/latest) always contains the latest per-user Setup executable, portable ZIP and SHA-256 files. The installer does not require administrator access. Windows SmartScreen may warn because the binaries are not code-signed.
 
-Run the newer Setup.exe over an existing Windows installation. Portable Windows users can replace the files from the newer ZIP. On Linux, replace the installed executable while preserving its path so an existing autostart entry remains valid. The executable is separate from the vault, so updating or uninstalling the application does not remove notes or settings. Keep a vault export before an update when the data matters.
+## Linux installation
 
-## Backup and recovery
+Download the Ubuntu or Arch archive and its `.sha256` file from GitHub Releases, then verify and install it:
 
-- **Recovery → Trash** restores notes deleted inside Lilo.
-- **Recovery → Backups** previews and restores rotating versions created during saving.
-- **Recovery → Diagnostics** reports Markdown files whose metadata could not be read normally.
-- **Settings → Storage → Export** copies Notes, Trash, and settings to a timestamped folder outside the active vault.
+Ubuntu and related distributions need the native windowing dependencies:
 
-Lilo never requires a proprietary database: notes remain Markdown files under the vault's `Notes` directory. If the application cannot start, copy the whole vault before manually repairing any file.
+```bash
+sudo apt-get update
+sudo apt-get install libssl-dev libwayland-dev libxcb-render0-dev \
+  libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev \
+  libxkbcommon-x11-dev pkg-config
+```
+
+```bash
+sha256sum -c Lilo-<version>-<platform>-x86_64.tar.gz.sha256
+tar -xzf Lilo-<version>-<platform>-x86_64.tar.gz
+cd Lilo-<version>-<platform>-x86_64
+install -Dm755 Lilo "$HOME/.local/bin/Lilo"
+```
+
+Launch the executable from its final location before enabling autostart. Linux packages are dynamically linked archives rather than native distribution packages.
+
+## Updating and uninstalling
+
+WinGet users can use the upgrade command above. Windows installer users can run the newer Setup executable over the existing installation. Portable and Linux users can replace the executable while keeping its path stable.
+
+Application files, settings and vault data are separate. Updating or uninstalling Lilo does not remove notes. Keep a current export when the vault matters.
+
+## Vaults and recovery
+
+New vaults use the directory selected by the user as the Markdown root. Lilo stores its recoverable application data under `.lilo/`:
+
+- `Trash/` contains notes deleted inside Lilo and supports restoration;
+- `Backups/` contains rotating versions saved before overwriting a note;
+- `cache/` contains rebuildable data.
+
+Vaults created with Lilo 0.2.1 or earlier retain their legacy `Notes`, `Trash` and `Backups` layout. Upgrading does not move those files.
+
+Recovery tools are available inside the application:
+
+- **Trash & Backups → Trash** restores deleted notes;
+- **Trash & Backups → Backups** previews and restores earlier versions;
+- **Diagnostics** reports malformed notes and unsafe, missing or malformed attachment links without rewriting files;
+- **Settings → Files & Storage → Export** creates a timestamped copy of notes, recovery data and settings.
+
+If Lilo cannot start, copy the complete vault before repairing files manually. Notes are ordinary Markdown and do not depend on an embedded database.
 
 ## Build and package
 
-The official Windows installer and ZIP are built by `.github/workflows/release.yml` on a clean GitHub-hosted Windows runner. For a local verification build, install the stable Rust toolchain and Inno Setup 6, then run:
+Run the release checks before packaging:
 
 ```powershell
-cargo fmt -- --check
+cargo fmt --all -- --check
 cargo test
 cargo clippy --all-targets -- -D warnings
 powershell -ExecutionPolicy Bypass -File .\scripts\package-windows.ps1
 ```
 
-The script performs a locked release build and creates the Inno Setup installer, portable ZIP, and their SHA-256 checksums under `dist/`. Linux artifacts are built natively in current Arch Linux and Ubuntu 22.04 environments, packaged with the same documentation, and accompanied by SHA-256 checksums. Release artifacts are intentionally ignored by Git.
+The packaging script creates the Windows installer, portable ZIP and SHA-256 files under `dist/`. Inno Setup 6 is required. Linux artifacts are built natively in their target environments.
 
-## Publishing releases and WinGet updates
+Pushing a `v<version>` tag runs `.github/workflows/release.yml`. The workflow verifies the tag against `Cargo.toml`, runs checks, publishes Windows artifacts and submits the matching WinGet update when `WINGET_GITHUB_TOKEN` is configured. Linux archives are uploaded to the same release after native verification.
 
-Pushing a `v<version>` tag runs `.github/workflows/release.yml`. The workflow verifies that the tag matches `Cargo.toml`, runs the tests, builds all Windows artifacts from that exact tag, and creates or updates the GitHub release. Verified Linux archives are then uploaded to the same release.
-
-The first WinGet version must be submitted once from the checked-in manifests:
-
-```powershell
-wingetcreate submit .\winget\0.1.0 --token $env:WINGET_GITHUB_TOKEN --no-open
-```
-
-After that PR has been accepted, add a repository Actions secret named `WINGET_GITHUB_TOKEN`. It should contain a GitHub token authorized to fork and open pull requests against `microsoft/winget-pkgs`. WinGet updates are then started explicitly through the release workflow's manual `publish_winget` option, so an unavailable community package cannot mark an otherwise valid GitHub release as failed. The `Retry WinGet submission` workflow can retry an update without rebuilding or replacing the release.
+The initial WinGet package is already published. A manually dispatched release can include or skip WinGet with its `publish_winget` option. If an automatic submission needs to be retried, run `.github/workflows/winget.yml` with the released version. Both paths use `wingetcreate update HellterEnjoy.Lilo` and require the `WINGET_GITHUB_TOKEN` Actions secret.

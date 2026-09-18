@@ -1,4 +1,4 @@
-use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Key, Pos2, Sense, Stroke};
+use eframe::egui::{self, Align2, Color32, FontId, Key, Sense};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -222,14 +222,14 @@ pub fn all_commands() -> Vec<CommandItem> {
             title: "Toggle left explorer sidebar",
             description: "Show or hide the file tree and explorer panel",
             category: CommandCategory::ViewAndLayout,
-            default_shortcut: Some("Ctrl+B"),
+            default_shortcut: Some("Ctrl+Shift+B"),
         },
         CommandItem {
             action: CommandAction::ToggleRightInspector,
             title: "Toggle right context inspector",
             description: "Show or hide local graph, backlinks, and outline",
             category: CommandCategory::ViewAndLayout,
-            default_shortcut: Some("Ctrl+I"),
+            default_shortcut: Some("Ctrl+Shift+I"),
         },
         CommandItem {
             action: CommandAction::ZoomIn,
@@ -382,6 +382,18 @@ pub fn fuzzy_score(pattern: &str, target: &str) -> Option<i64> {
     }
 }
 
+use crate::{
+    links::LinkIndex,
+    search::SearchQuery,
+    storage::{AppSettings, Note},
+    tags::TagIndex,
+    ui_style,
+};
+use std::{
+    collections::HashMap,
+    hash::{Hash, Hasher},
+    path::Path,
+};
 use uuid::Uuid;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -391,22 +403,19 @@ pub enum CommandPaletteResult {
 }
 
 #[derive(Clone)]
-enum PaletteEntry {
-    Command {
-        action: CommandAction,
-        title: &'static str,
-        description: &'static str,
-        category: &'static str,
-        shortcut: Option<&'static str>,
-        is_recent: bool,
-    },
-    Note {
-        id: Uuid,
-        title: String,
-        folder: String,
-        updated_text: String,
-        is_recent: bool,
-    },
+enum Destination {
+    Action(CommandAction),
+    Note(Uuid),
+    Query(String),
+}
+
+#[derive(Clone)]
+struct PaletteEntry {
+    title: String,
+    detail: String,
+    snippet: String,
+    shortcut: String,
+    destination: Destination,
 }
 
 #[derive(Default)]
@@ -415,16 +424,24 @@ pub struct CommandPaletteState {
     pub query: String,
     pub selected_index: usize,
     pub focus_input: bool,
+    pub scope: usize,
+    cache_key: Option<u64>,
+    results: Vec<PaletteEntry>,
 }
 
 impl CommandPaletteState {
     pub fn open(&mut self) {
+        if self.is_open {
+            self.focus_input = true;
+            return;
+        }
         self.is_open = true;
         self.query.clear();
         self.selected_index = 0;
+        self.scope = 0;
         self.focus_input = true;
+        self.cache_key = None;
     }
-
     pub fn close(&mut self) {
         self.is_open = false;
         self.query.clear();
@@ -432,454 +449,516 @@ impl CommandPaletteState {
     }
 }
 
-/// Renders the modal Command Palette overlay supporting commands, recent items, and notes search.
+fn excerpt(content: &str, query: &SearchQuery) -> String {
+    let line = content
+        .lines()
+        .find(|line| {
+            query
+                .text_terms
+                .iter()
+                .any(|term| line.to_lowercase().contains(term))
+        })
+        .or_else(|| content.lines().find(|line| !line.trim().is_empty()))
+        .unwrap_or("");
+    let chars: Vec<char> = line.chars().collect();
+    let match_start = query
+        .text_terms
+        .iter()
+        .filter_map(|term| {
+            line.to_lowercase()
+                .find(term)
+                .map(|byte| line.to_lowercase()[..byte].chars().count())
+        })
+        .min()
+        .unwrap_or(0);
+    let start = match_start.saturating_sub(32).min(chars.len());
+    format!(
+        "{}{}{}",
+        if start > 0 { "…" } else { "" },
+        chars[start..].iter().take(130).collect::<String>(),
+        if chars.len() > start + 130 { "…" } else { "" }
+    )
+}
+
+fn entries(
+    query: &str,
+    scope: usize,
+    notes: &[Note],
+    root: &Path,
+    links: &LinkIndex,
+    tags: &TagIndex,
+    settings: &AppSettings,
+) -> Vec<PaletteEntry> {
+    let parsed = SearchQuery::parse(query);
+    let filtered = !parsed.tags.is_empty()
+        || !parsed.negated_tags.is_empty()
+        || !parsed.paths.is_empty()
+        || !parsed.negated_paths.is_empty()
+        || !parsed.links.is_empty()
+        || !parsed.titles.is_empty()
+        || !parsed.negated_terms.is_empty();
+    let mut results: Vec<(i64, PaletteEntry)> = Vec::new();
+    if scope == 0 || scope == 1 {
+        let by_id: HashMap<_, _> = notes.iter().map(|note| (note.id, note)).collect();
+        for note in notes {
+            let title = if note.title.trim().is_empty() {
+                "Untitled"
+            } else {
+                &note.title
+            };
+            let relative = note.file_path.strip_prefix(root).unwrap_or(&note.file_path);
+            let targets: Vec<String> = if parsed.links.is_empty() {
+                Vec::new()
+            } else {
+                links
+                    .links_for(note.id)
+                    .map(|links| {
+                        links
+                            .unresolved
+                            .iter()
+                            .cloned()
+                            .chain(
+                                links
+                                    .outgoing
+                                    .iter()
+                                    .filter_map(|id| by_id.get(id).map(|note| note.title.clone())),
+                            )
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            let matches =
+                parsed.matches_note(note, relative.parent().unwrap_or(Path::new("")), &targets);
+            let score = if query.is_empty() {
+                Some(100)
+            } else if filtered {
+                matches.then_some(150)
+            } else {
+                fuzzy_score(query, title)
+                    .into_iter()
+                    .chain(
+                        note.aliases
+                            .iter()
+                            .filter_map(|alias| fuzzy_score(query, alias)),
+                    )
+                    .chain(matches.then_some(80))
+                    .max()
+            };
+            if let Some(score) = score {
+                let recent = settings
+                    .recent_note_ids
+                    .iter()
+                    .position(|id| *id == note.id);
+                results.push((
+                    score + recent.map_or(0, |i| 40i64.saturating_sub(i as i64)),
+                    PaletteEntry {
+                        title: title.to_owned(),
+                        detail: relative.display().to_string(),
+                        snippet: excerpt(&note.content, &parsed),
+                        shortcut: String::new(),
+                        destination: Destination::Note(note.id),
+                    },
+                ));
+            }
+        }
+    }
+    if scope == 0 || scope == 3 {
+        for command in all_commands() {
+            let score = if query.is_empty() {
+                Some(20)
+            } else {
+                fuzzy_score(query, command.title)
+                    .into_iter()
+                    .chain(fuzzy_score(query, command.description).map(|score| score / 2))
+                    .max()
+            };
+            if let Some(score) = score {
+                let shortcut = match command.action {
+                    CommandAction::NewNote => settings.shortcuts.new_note.as_str(),
+                    CommandAction::SaveNote => settings.shortcuts.save.as_str(),
+                    _ => command.default_shortcut.unwrap_or(""),
+                };
+                results.push((
+                    score,
+                    PaletteEntry {
+                        title: command.title.to_owned(),
+                        detail: format!("{} · {}", command.category.label(), command.description),
+                        snippet: String::new(),
+                        shortcut: shortcut.to_owned(),
+                        destination: Destination::Action(command.action),
+                    },
+                ));
+            }
+        }
+    }
+    if scope == 0 || scope == 2 {
+        for tag in tags.all_tags() {
+            if query.is_empty()
+                || tag
+                    .tag
+                    .to_lowercase()
+                    .contains(&query.trim_start_matches('#').to_lowercase())
+            {
+                results.push((
+                    60,
+                    PaletteEntry {
+                        title: format!("#{}", tag.tag),
+                        detail: format!("{} notes · filter by tag", tag.count),
+                        snippet: String::new(),
+                        shortcut: String::new(),
+                        destination: Destination::Query(format!("tag:\"{}\"", tag.tag)),
+                    },
+                ));
+            }
+        }
+    }
+    if scope == 0 || scope == 4 {
+        for preset in &settings.search_presets {
+            if query.is_empty()
+                || fuzzy_score(query, &preset.name).is_some()
+                || preset.query.contains(query)
+            {
+                results.push((
+                    50,
+                    PaletteEntry {
+                        title: preset.name.clone(),
+                        detail: preset.query.clone(),
+                        snippet: String::new(),
+                        shortcut: "Saved search".to_owned(),
+                        destination: Destination::Query(preset.query.clone()),
+                    },
+                ));
+            }
+        }
+    }
+    results.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.title.cmp(&b.1.title)));
+    results.into_iter().map(|(_, entry)| entry).collect()
+}
+
+/// Input, scoring and activation happen in that order so Enter cannot open stale results.
 pub fn show_command_palette(
     ctx: &egui::Context,
     state: &mut CommandPaletteState,
-    recent_commands: &[CommandAction],
-    recent_note_ids: &[Uuid],
-    notes: &[crate::storage::Note],
-    notes_dir: &std::path::Path,
+    notes: &[Note],
+    root: &Path,
+    links: &LinkIndex,
+    tags: &TagIndex,
+    settings: &AppSettings,
 ) -> Option<CommandPaletteResult> {
     if !state.is_open {
         return None;
     }
-
-    let mut executed_result = None;
-    let commands = all_commands();
-    let query_trimmed = state.query.trim();
-
-    let mut scored: Vec<(i64, PaletteEntry)> = Vec::new();
-
-    if query_trimmed.is_empty() {
-        // 1. Recent Commands
-        let mut added_recent_actions = Vec::new();
-        for &recent_action in recent_commands {
-            if let Some(cmd) = commands.iter().find(|c| c.action == recent_action)
-                && !added_recent_actions.contains(&recent_action)
-            {
-                added_recent_actions.push(recent_action);
-                scored.push((
-                    1000,
-                    PaletteEntry::Command {
-                        action: cmd.action,
-                        title: cmd.title,
-                        description: cmd.description,
-                        category: cmd.category.label(),
-                        shortcut: cmd.default_shortcut,
-                        is_recent: true,
-                    },
-                ));
-            }
-        }
-
-        // 2. Recent Notes
-        for &note_id in recent_note_ids.iter().take(6) {
-            if let Some(note) = notes.iter().find(|n| n.id == note_id) {
-                let folder_rel = note
-                    .file_path
-                    .strip_prefix(notes_dir)
-                    .ok()
-                    .and_then(|p| p.parent())
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_default();
-                let title = if note.title.trim().is_empty() {
-                    "Untitled".to_owned()
-                } else {
-                    note.title.clone()
-                };
-                let updated_text = note.updated_at.format("%d/%m %H:%M").to_string();
-                scored.push((
-                    800,
-                    PaletteEntry::Note {
-                        id: note.id,
-                        title,
-                        folder: folder_rel,
-                        updated_text,
-                        is_recent: true,
-                    },
-                ));
-            }
-        }
-
-        // 3. Other Commands
-        for cmd in &commands {
-            if !added_recent_actions.contains(&cmd.action) {
-                scored.push((
-                    500,
-                    PaletteEntry::Command {
-                        action: cmd.action,
-                        title: cmd.title,
-                        description: cmd.description,
-                        category: cmd.category.label(),
-                        shortcut: cmd.default_shortcut,
-                        is_recent: false,
-                    },
-                ));
-            }
-        }
-    } else {
-        // Search Commands
-        for cmd in &commands {
-            let title_score = fuzzy_score(query_trimmed, cmd.title);
-            let desc_score = fuzzy_score(query_trimmed, cmd.description).map(|s| s / 2);
-            let cat_score = fuzzy_score(query_trimmed, cmd.category.label()).map(|s| s / 3);
-
-            let max_score = title_score
-                .into_iter()
-                .chain(desc_score)
-                .chain(cat_score)
-                .max();
-
-            if let Some(score) = max_score {
-                let is_recent = recent_commands.contains(&cmd.action);
-                let final_score = if is_recent { score + 50 } else { score };
-                scored.push((
-                    final_score,
-                    PaletteEntry::Command {
-                        action: cmd.action,
-                        title: cmd.title,
-                        description: cmd.description,
-                        category: cmd.category.label(),
-                        shortcut: cmd.default_shortcut,
-                        is_recent,
-                    },
-                ));
-            }
-        }
-
-        // Search Notes
-        for note in notes {
-            let note_title = if note.title.trim().is_empty() {
-                "Untitled"
-            } else {
-                note.title.as_str()
-            };
-            let folder_rel = note
-                .file_path
-                .strip_prefix(notes_dir)
-                .ok()
-                .and_then(|p| p.parent())
-                .map(|p| p.display().to_string())
-                .unwrap_or_default();
-
-            let title_score = fuzzy_score(query_trimmed, note_title);
-            let folder_score = if !folder_rel.is_empty() {
-                fuzzy_score(query_trimmed, &folder_rel).map(|s| s / 2)
-            } else {
-                None
-            };
-
-            let max_score = title_score.into_iter().chain(folder_score).max();
-            if let Some(score) = max_score {
-                let is_recent = recent_note_ids.contains(&note.id);
-                let final_score = if is_recent { score + 60 } else { score };
-                let updated_text = note.updated_at.format("%d/%m %H:%M").to_string();
-                scored.push((
-                    final_score,
-                    PaletteEntry::Note {
-                        id: note.id,
-                        title: note_title.to_owned(),
-                        folder: folder_rel,
-                        updated_text,
-                        is_recent,
-                    },
-                ));
-            }
-        }
-
-        scored.sort_by_key(|item| std::cmp::Reverse(item.0));
-    }
-
-    let matching_count = scored.len();
-
-    if matching_count > 0 && state.selected_index >= matching_count {
-        state.selected_index = matching_count - 1;
-    }
-
-    // Keyboard navigation
-    if ctx.input(|i| i.key_pressed(Key::Escape)) {
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
         state.close();
         return None;
     }
-    if ctx.input(|i| i.key_pressed(Key::ArrowDown)) && matching_count > 0 {
-        state.selected_index = (state.selected_index + 1) % matching_count;
-    }
-    if ctx.input(|i| i.key_pressed(Key::ArrowUp)) && matching_count > 0 {
-        state.selected_index = if state.selected_index == 0 {
-            matching_count - 1
-        } else {
-            state.selected_index - 1
-        };
-    }
-    if ctx.input(|i| i.key_pressed(Key::Enter)) && matching_count > 0 {
-        let result = match &scored[state.selected_index].1 {
-            PaletteEntry::Command { action, .. } => CommandPaletteResult::Action(*action),
-            PaletteEntry::Note { id, .. } => CommandPaletteResult::OpenNote(*id),
-        };
-        executed_result = Some(result);
-        state.close();
-        return executed_result;
-    }
-
-    // Draw dimmed background overlay
-    let screen_rect = crate::ui_style::screen_rect(ctx);
-    let painter = ctx.layer_painter(egui::LayerId::new(
-        egui::Order::Background,
-        egui::Id::new("command_palette_dim"),
-    ));
-    painter.rect_filled(screen_rect, 0.0, Color32::from_black_alpha(140));
-
-    // Render palette window
-    let modal_width = 580.0_f32.min(screen_rect.width() - 32.0);
-    let modal_pos = Pos2::new(screen_rect.center().x, screen_rect.top() + 70.0);
-
-    egui::Area::new(egui::Id::new("command_palette_area"))
-        .order(egui::Order::Foreground)
-        .fixed_pos(modal_pos)
-        .pivot(Align2::CENTER_TOP)
+    let down = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowDown));
+    let up = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::ArrowUp));
+    let enter = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter));
+    let mut result = None;
+    let mut activate = None;
+    let screen = ui_style::screen_rect(ctx);
+    egui::Modal::new(egui::Id::new("command_palette_area"))
+        .frame(ui_style::modal_frame(ctx))
+        .area(
+            egui::Modal::default_area(egui::Id::new("command_palette_area"))
+                .anchor(Align2::CENTER_TOP, egui::vec2(0.0, 16.0)),
+        )
         .show(ctx, |ui| {
-            egui::Frame::new()
-                .fill(ui.visuals().window_fill)
-                .stroke(Stroke::new(
-                    1.0,
-                    ui.visuals().widgets.inactive.bg_stroke.color,
-                ))
-                .corner_radius(CornerRadius::same(12))
-                .inner_margin(egui::Margin::same(12))
-                .shadow(egui::Shadow {
-                    offset: [0, 8],
-                    blur: 24,
-                    spread: 0,
-                    color: Color32::from_black_alpha(180),
-                })
-                .show(ui, |ui| {
-                    ui.set_width(modal_width);
+            ui.set_width((screen.width() - 64.0).clamp(180.0, 620.0));
+            ui.heading("Search & Commands");
+            let input = ui.add(
+                egui::TextEdit::singleline(&mut state.query)
+                    .id(egui::Id::new("command_palette_input"))
+                    .hint_text("Search notes, tag: or path:…")
+                    .desired_width(f32::INFINITY)
+                    .font(FontId::proportional(16.0)),
+            );
+            if state.focus_input {
+                input.request_focus();
+                state.focus_input = false;
+            }
+            ui.horizontal_wrapped(|ui| {
+                for (scope, label) in ["All", "Notes", "Tags", "Commands", "Saved"]
+                    .iter()
+                    .enumerate()
+                {
+                    if ui
+                        .selectable_value(&mut state.scope, scope, *label)
+                        .changed()
+                    {
+                        state.selected_index = 0;
+                    }
+                }
+            });
+            if input.changed() {
+                state.selected_index = 0;
+            }
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            (
+                links.generation(),
+                &state.query,
+                state.scope,
+                &settings.recent_note_ids,
+            )
+                .hash(&mut hash);
+            for preset in &settings.search_presets {
+                (&preset.name, &preset.query).hash(&mut hash);
+            }
+            (&settings.shortcuts.new_note, &settings.shortcuts.save).hash(&mut hash);
+            let key = hash.finish();
+            if state.cache_key != Some(key) {
+                state.results = entries(
+                    state.query.trim(),
+                    state.scope,
+                    notes,
+                    root,
+                    links,
+                    tags,
+                    settings,
+                );
+                state.cache_key = Some(key);
+            }
+            let count = state.results.len();
+            state.selected_index = state.selected_index.min(count.saturating_sub(1));
 
-                    ui.horizontal(|ui| {
-                        let search_id = egui::Id::new("command_palette_input");
-                        let input = ui.add(
-                            egui::TextEdit::singleline(&mut state.query)
-                                .id(search_id)
-                                .desired_width(f32::INFINITY)
-                                .hint_text(
-                                    "Type a command, note title, or search (e.g. daily, zen)...",
-                                )
-                                .font(FontId::proportional(15.0))
-                                .margin(egui::Margin::symmetric(8, 8)),
-                        );
-
-                        if state.focus_input {
-                            input.request_focus();
-                            state.focus_input = false;
-                        }
-                    });
-
-                    ui.add_space(8.0);
-                    ui.separator();
-                    ui.add_space(4.0);
-
-                    let list_height = 300.0_f32.min(screen_rect.height() - 180.0);
-                    egui::ScrollArea::vertical()
-                        .max_height(list_height)
+            if count > 0 {
+                if down {
+                    state.selected_index = (state.selected_index + 1) % count;
+                }
+                if up {
+                    state.selected_index = (state.selected_index + count - 1) % count;
+                }
+                if enter {
+                    activate = Some(state.results[state.selected_index].destination.clone());
+                }
+            }
+            ui.separator();
+            let parsed = SearchQuery::parse(&state.query);
+            let terms: Vec<&str> = parsed
+                .text_terms
+                .iter()
+                .chain(&parsed.titles)
+                .map(String::as_str)
+                .collect();
+            if count == 0 {
+                ui.label(format!("No results for “{}”", state.query));
+                ui_style::muted(ui, "Check spelling or try fewer filters.");
+                if ui.button("Search all notes").clicked() {
+                    state.query.clear();
+                    state.scope = 1;
+                }
+            }
+            let row_height = 96.0;
+            let list_height = (screen.height() - 220.0).max(60.0);
+            let mut scroll = egui::ScrollArea::vertical()
+                .id_salt("palette_results")
+                .max_height(list_height);
+            if down || up || input.changed() {
+                scroll = scroll.vertical_scroll_offset(
+                    (state.selected_index as f32 * (row_height + ui.spacing().item_spacing.y)
+                        - list_height / 2.0
+                        + row_height / 2.0)
+                        .max(0.0),
+                );
+            }
+            scroll.show_rows(ui, row_height, count, |ui, range| {
+                for index in range {
+                    let entry = &state.results[index];
+                    let selected = index == state.selected_index;
+                    let row = egui::Frame::new()
+                        .fill(if selected {
+                            ui.visuals().selection.bg_fill
+                        } else {
+                            Color32::TRANSPARENT
+                        })
+                        .corner_radius(8)
+                        .inner_margin(egui::Margin::same(8))
                         .show(ui, |ui| {
-                            if scored.is_empty() {
-                                ui.add_space(16.0);
-                                ui.vertical_centered(|ui| {
-                                    ui.label(
-                                        egui::RichText::new("No matching commands or notes found")
-                                            .color(ui.visuals().weak_text_color()),
-                                    );
-                                });
-                                ui.add_space(16.0);
-                            } else {
-                                for (idx, (_, entry)) in scored.iter().enumerate() {
-                                    let is_selected = idx == state.selected_index;
-                                    let fill = if is_selected {
-                                        ui.visuals().selection.bg_fill.gamma_multiply(0.7)
-                                    } else {
-                                        Color32::TRANSPARENT
-                                    };
-
-                                    let row = egui::Frame::new()
-                                        .fill(fill)
-                                        .corner_radius(CornerRadius::same(6))
-                                        .inner_margin(egui::Margin::symmetric(10, 7))
-                                        .show(ui, |ui| {
-                                            ui.set_width(ui.available_width());
-                                            match entry {
-                                                PaletteEntry::Command {
-                                                    title,
-                                                    description,
-                                                    category,
-                                                    shortcut,
-                                                    is_recent,
-                                                    ..
-                                                } => {
-                                                    ui.horizontal(|ui| {
-                                                        ui.vertical(|ui| {
-                                                            ui.horizontal(|ui| {
-                                                                if *is_recent {
-                                                                    ui.label(
-                                                                        egui::RichText::new("🕒")
-                                                                            .small(),
-                                                                    );
-                                                                }
-                                                                ui.label(
-                                                                    egui::RichText::new(*title)
-                                                                        .strong()
-                                                                        .size(14.0),
-                                                                );
-                                                            });
-                                                            ui.label(
-                                                                egui::RichText::new(*description)
-                                                                    .small()
-                                                                    .color(
-                                                                        ui.visuals()
-                                                                            .weak_text_color(),
-                                                                    ),
-                                                            );
-                                                        });
-                                                        ui.with_layout(
-                                                            egui::Layout::right_to_left(
-                                                                egui::Align::Center,
-                                                            ),
-                                                            |ui| {
-                                                                if let Some(sc) = shortcut {
-                                                                    ui.label(
-                                                                        egui::RichText::new(*sc)
-                                                                            .small()
-                                                                            .monospace()
-                                                                            .color(
-                                                                                ui.visuals()
-                                                                                    .hyperlink_color,
-                                                                            ),
-                                                                    );
-                                                                }
-                                                                ui.label(
-                                                                    egui::RichText::new(if *is_recent {
-                                                                        "Recent"
-                                                                    } else {
-                                                                        *category
-                                                                    })
-                                                                    .small()
-                                                                    .color(
-                                                                        ui.visuals()
-                                                                            .weak_text_color(),
-                                                                    ),
-                                                                );
-                                                            },
-                                                        );
-                                                    });
-                                                }
-                                                PaletteEntry::Note {
-                                                    title,
-                                                    folder,
-                                                    updated_text,
-                                                    is_recent,
-                                                    ..
-                                                } => {
-                                                    ui.horizontal(|ui| {
-                                                        ui.vertical(|ui| {
-                                                            ui.horizontal(|ui| {
-                                                                ui.label(
-                                                                    egui::RichText::new(if *is_recent {
-                                                                        "🕒 📄"
-                                                                    } else {
-                                                                        "📄"
-                                                                    })
-                                                                    .small(),
-                                                                );
-                                                                ui.label(
-                                                                    egui::RichText::new(title)
-                                                                        .strong()
-                                                                        .size(14.0),
-                                                                );
-                                                            });
-                                                            if !folder.is_empty() {
-                                                                ui.label(
-                                                                    egui::RichText::new(format!(
-                                                                        "📁 {folder}"
-                                                                    ))
-                                                                    .small()
-                                                                    .color(
-                                                                        ui.visuals()
-                                                                            .weak_text_color(),
-                                                                    ),
-                                                                );
-                                                            }
-                                                        });
-                                                        ui.with_layout(
-                                                            egui::Layout::right_to_left(
-                                                                egui::Align::Center,
-                                                            ),
-                                                            |ui| {
-                                                                ui.label(
-                                                                    egui::RichText::new(updated_text)
-                                                                        .small()
-                                                                        .color(
-                                                                            ui.visuals()
-                                                                                .weak_text_color(),
-                                                                        ),
-                                                                );
-                                                                ui.label(
-                                                                    egui::RichText::new(if *is_recent {
-                                                                        "Recent Note"
-                                                                    } else {
-                                                                        "Note"
-                                                                    })
-                                                                    .small()
-                                                                    .color(
-                                                                        ui.visuals()
-                                                                            .hyperlink_color,
-                                                                    ),
-                                                                );
-                                                            },
-                                                        );
-                                                    });
-                                                }
-                                            }
-                                        })
-                                        .response
-                                        .interact(Sense::click());
-
-                                    if row.clicked() {
-                                        let result = match &entry {
-                                            PaletteEntry::Command { action, .. } => {
-                                                CommandPaletteResult::Action(*action)
-                                            }
-                                            PaletteEntry::Note { id, .. } => {
-                                                CommandPaletteResult::OpenNote(*id)
-                                            }
-                                        };
-                                        executed_result = Some(result);
-                                        state.close();
-                                    }
-                                    if row.hovered() {
-                                        state.selected_index = idx;
-                                    }
-                                    ui.add_space(2.0);
-                                }
+                            ui.spacing_mut().item_spacing.y = 2.0;
+                            ui.set_min_size(egui::vec2(ui.available_width(), row_height - 16.0));
+                            ui.add(
+                                egui::Label::new(ui_style::highlighted_terms(
+                                    ui,
+                                    &entry.title,
+                                    &terms,
+                                    15.0,
+                                    false,
+                                ))
+                                .truncate(),
+                            );
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(&entry.detail).size(12.0).weak(),
+                                )
+                                .truncate(),
+                            )
+                            .on_hover_text(&entry.detail);
+                            if !entry.snippet.is_empty() {
+                                ui.add(
+                                    egui::Label::new(ui_style::highlighted_terms(
+                                        ui,
+                                        &entry.snippet,
+                                        &terms,
+                                        13.0,
+                                        true,
+                                    ))
+                                    .truncate(),
+                                );
                             }
-                        });
-
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new("↑↓ Navigate  •  Enter Execute/Open  •  Esc Close")
-                                .small()
-                                .color(ui.visuals().weak_text_color()),
-                        );
-                    });
-                });
+                            if !entry.shortcut.is_empty() {
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(&entry.shortcut).size(11.0).weak(),
+                                    )
+                                    .truncate(),
+                                );
+                            }
+                        })
+                        .response
+                        .interact(Sense::click());
+                    if row.hovered() && ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO) {
+                        state.selected_index = index;
+                    }
+                    if row.clicked() {
+                        activate = Some(entry.destination.clone());
+                    }
+                }
+            });
+            ui_style::muted(ui, "Up/Down: navigate · Enter: open · Esc: close");
         });
-
-    executed_result
+    if let Some(destination) = activate {
+        match destination {
+            Destination::Note(id) => {
+                result = Some(CommandPaletteResult::OpenNote(id));
+                state.close();
+            }
+            Destination::Action(action) => {
+                result = Some(CommandPaletteResult::Action(action));
+                state.close();
+            }
+            Destination::Query(query) => {
+                state.query = query;
+                state.scope = 1;
+                state.selected_index = 0;
+                state.focus_input = true;
+            }
+        }
+    }
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn palette_keyboard_uses_current_query_and_navigates_focused_results() {
+        let ctx = egui::Context::default();
+        let root = Path::new("/vault");
+        let notes = vec![
+            Note::new_named(root, "Alpha"),
+            Note::new_named(root, "Beta"),
+        ];
+        let links = LinkIndex::build(&notes, root);
+        let tags = TagIndex::build(&notes);
+        let settings = AppSettings::default();
+        let mut state = CommandPaletteState::default();
+        state.open();
+        state.scope = 1;
+        let key = |key| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        for (events, expected) in [
+            (vec![], None),
+            (vec![key(Key::ArrowDown)], None),
+            (
+                vec![key(Key::Enter)],
+                Some(CommandPaletteResult::OpenNote(notes[1].id)),
+            ),
+        ] {
+            let mut result = None;
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |_| {
+                    result = show_command_palette(
+                        &ctx, &mut state, &notes, root, &links, &tags, &settings,
+                    );
+                },
+            );
+            output.textures_delta.clear();
+            assert_eq!(result, expected);
+        }
+        state.open();
+        state.scope = 1;
+        let mut output = ctx.run_ui(egui::RawInput::default(), |_| {
+            show_command_palette(&ctx, &mut state, &notes, root, &links, &tags, &settings);
+        });
+        output.textures_delta.clear();
+        let mut result = None;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::Text("Beta".into()), key(Key::Enter)],
+                ..Default::default()
+            },
+            |_| {
+                result =
+                    show_command_palette(&ctx, &mut state, &notes, root, &links, &tags, &settings);
+            },
+        );
+        output.textures_delta.clear();
+        assert_eq!(result, Some(CommandPaletteResult::OpenNote(notes[1].id)));
+    }
+
+    #[test]
+    fn palette_scopes_include_all_notes_aliases_tags_saved_queries_and_filters() {
+        let root = Path::new("/vault");
+        let mut first = Note::new_named(&root.join("Projects"), "Первый");
+        first.aliases.push("Alias".to_owned());
+        first.tags.push("design".to_owned());
+        first.content = "Содержимое важной заметки".to_owned();
+        first.refresh_search_text();
+        let notes = vec![first, Note::new_named(root, "Second")];
+        let links = LinkIndex::build(&notes, root);
+        let tags = TagIndex::build(&notes);
+        let settings = AppSettings::default();
+        assert_eq!(
+            entries("", 1, &notes, root, &links, &tags, &settings).len(),
+            2
+        );
+        assert_eq!(
+            entries("Alias", 1, &notes, root, &links, &tags, &settings).len(),
+            1
+        );
+        assert_eq!(
+            entries(
+                "path:Projects tag:design важной",
+                1,
+                &notes,
+                root,
+                &links,
+                &tags,
+                &settings
+            )
+            .len(),
+            1
+        );
+        assert_eq!(
+            entries("", 2, &notes, root, &links, &tags, &settings).len(),
+            1
+        );
+        assert_eq!(
+            entries("", 4, &notes, root, &links, &tags, &settings).len(),
+            settings.search_presets.len()
+        );
+    }
 
     #[test]
     fn fuzzy_matching_scores_exact_and_prefix_higher() {

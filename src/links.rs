@@ -5,7 +5,9 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use uuid::Uuid;
+static INDEX_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WikiLink {
@@ -33,9 +35,13 @@ pub enum LinkResolution {
 pub struct LinkIndex {
     by_note: HashMap<Uuid, NoteLinks>,
     names: NameLookup,
+    generation: u64,
 }
 
 impl LinkIndex {
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
     pub fn build(notes: &[Note], notes_root: &Path) -> Self {
         let names = NameLookup::build(notes, notes_root);
         let mut by_note = HashMap::with_capacity(notes.len());
@@ -44,7 +50,11 @@ impl LinkIndex {
             by_note.insert(note.id, resolve_note_links(note, &names));
         }
 
-        let mut index = Self { by_note, names };
+        let mut index = Self {
+            by_note,
+            names,
+            generation: INDEX_GENERATION.fetch_add(1, Ordering::Relaxed),
+        };
         index.rebuild_backlinks();
         index
     }
@@ -65,6 +75,7 @@ impl LinkIndex {
 
     /// Reparses one note without rescanning the vault.
     pub fn refresh_note_content(&mut self, note: &Note) {
+        self.generation = INDEX_GENERATION.fetch_add(1, Ordering::Relaxed);
         self.by_note
             .insert(note.id, resolve_note_links(note, &self.names));
         self.rebuild_backlinks();
@@ -443,6 +454,16 @@ pub fn rename_note_references(notes: &mut [Note], old_title: &str, new_title: &s
     modified_note_ids
 }
 
+/// Calculates the affected notes without changing the live vault state.
+pub fn preview_note_reference_rename(
+    notes: &[Note],
+    old_title: &str,
+    new_title: &str,
+) -> Vec<Uuid> {
+    let mut preview = notes.to_vec();
+    rename_note_references(&mut preview, old_title, new_title)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -584,6 +605,17 @@ mod tests {
             notes[0].content,
             "See [[New Name]], [[New Name#Heading]], [[New Name|Custom Alias]], and [[Folder/New Name#Sub|Label]]."
         );
+    }
+
+    #[test]
+    fn link_rename_preview_does_not_mutate_notes() {
+        let notes = vec![note("Index", &[], "See [[Old Note|label]].")];
+        let original = notes[0].content.clone();
+
+        let affected = preview_note_reference_rename(&notes, "Old Note", "New Note");
+
+        assert_eq!(affected, vec![notes[0].id]);
+        assert_eq!(notes[0].content, original);
     }
 
     #[test]

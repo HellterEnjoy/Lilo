@@ -1,11 +1,13 @@
 //! Cursor-aware Markdown layout for the live editor.
 
+use crate::note_preview::BlockImage;
 use eframe::egui::{
     Color32, Context, FontFamily, FontId, Id, Stroke, TextEdit, TextFormat, Ui, Visuals,
     text::{CCursor, CCursorRange, LayoutJob},
     text_edit::TextEditOutput,
     text_edit::TextEditState,
 };
+use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -34,13 +36,61 @@ struct CachedLayout {
     active_line: Option<usize>,
     visual_key: u64,
     body_size_bits: u32,
+    image_layout_hash: u64,
     job: LayoutJob,
 }
 
+struct PreparedImage {
+    line_index: usize,
+    char_index: usize,
+    uri: String,
+    alt: String,
+    size: eframe::egui::Vec2,
+}
+
 /// Shows one live Markdown editor. `id` owns its cursor and undo state.
-pub fn show_editor(ui: &mut Ui, text: &mut String, id: Id, body_size: f32) -> TextEditOutput {
+pub fn show_editor(
+    ui: &mut Ui,
+    text: &mut String,
+    id: Id,
+    body_size: f32,
+    images: &[BlockImage],
+) -> TextEditOutput {
     let visible_width = (ui.clip_rect().right() - ui.cursor().left()).max(24.0);
     let editor_width = ui.available_width().min(visible_width).max(24.0);
+    let max_image_size = eframe::egui::vec2(editor_width.min(720.0), 300.0);
+    let prepared_images: Vec<PreparedImage> = if text.len() <= MAX_HIGHLIGHT_BYTES {
+        images
+            .iter()
+            .map(|image| {
+                let widget = eframe::egui::Image::new(image.uri.as_str())
+                    .max_size(max_image_size)
+                    .corner_radius(6);
+                let size = widget
+                    .load_and_calc_size(ui, max_image_size)
+                    .unwrap_or(eframe::egui::vec2(max_image_size.x.min(240.0), 140.0));
+                PreparedImage {
+                    line_index: image.line_index,
+                    char_index: image.char_index,
+                    uri: image.uri.clone(),
+                    alt: image.alt.clone(),
+                    size,
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let image_heights: HashMap<usize, f32> = prepared_images
+        .iter()
+        .map(|image| (image.line_index, image.size.y + body_size * 1.55 + 12.0))
+        .collect();
+    let mut image_hasher = DefaultHasher::new();
+    for image in &prepared_images {
+        image.line_index.hash(&mut image_hasher);
+        image.size.y.to_bits().hash(&mut image_hasher);
+    }
+    let image_layout_hash = image_hasher.finish();
     let active_line = ui
         .memory(|memory| memory.has_focus(id))
         .then(|| TextEditState::load(ui.ctx(), id))
@@ -64,9 +114,18 @@ pub fn show_editor(ui: &mut Ui, text: &mut String, id: Id, body_size: f32) -> Te
                     && cached.active_line == active_line
                     && cached.visual_key == visual_key
                     && cached.body_size_bits == body_size.to_bits()
+                    && cached.image_layout_hash == image_layout_hash
             })
             .map_or_else(
-                || highlight(source, ui.visuals(), active_line, body_size),
+                || {
+                    highlight_with_images(
+                        source,
+                        ui.visuals(),
+                        active_line,
+                        body_size,
+                        &image_heights,
+                    )
+                },
                 |cached| cached.job.clone(),
             );
         layout_job.wrap.max_width = wrap_width;
@@ -75,6 +134,7 @@ pub fn show_editor(ui: &mut Ui, text: &mut String, id: Id, body_size: f32) -> Te
             active_line,
             visual_key,
             body_size_bits: body_size.to_bits(),
+            image_layout_hash,
             job: layout_job.clone(),
         }));
         ui.fonts_mut(|fonts| fonts.layout_job(layout_job))
@@ -90,6 +150,20 @@ pub fn show_editor(ui: &mut Ui, text: &mut String, id: Id, body_size: f32) -> Te
         .show(ui);
     if let Some(cache) = rendered_cache {
         ui.ctx().data_mut(|data| data.insert_temp(cache_id, cache));
+    }
+    for image in &prepared_images {
+        let row = output
+            .galley
+            .pos_from_cursor(CCursor::new(image.char_index))
+            .translate(output.galley_pos.to_vec2());
+        let rect =
+            eframe::egui::Rect::from_min_size(row.min + eframe::egui::vec2(2.0, 4.0), image.size);
+        if rect.intersects(ui.clip_rect()) {
+            eframe::egui::Image::new(image.uri.as_str())
+                .corner_radius(6)
+                .alt_text(image.alt.as_str())
+                .paint_at(ui, rect);
+        }
     }
     output
 }
@@ -229,7 +303,7 @@ pub fn continue_list_at_cursor(ctx: &Context, id: Id, text: &mut String) -> bool
     true
 }
 
-/// Inserts an attachment markdown link at the current cursor position (or at end of text if unselected).
+/// Inserts an attachment on its own line at the cursor, replacing any selection.
 pub fn insert_attachment_link(
     ctx: &Context,
     id: Id,
@@ -240,23 +314,42 @@ pub fn insert_attachment_link(
 ) {
     let mut state = TextEditState::load(ctx, id).unwrap_or_default();
     let char_count = text.chars().count();
-    let char_index = state
+    let selection = state
         .cursor
         .char_range()
-        .map(|r| usize::from(r.primary.index))
-        .unwrap_or(char_count)
-        .min(char_count);
+        .map(|range| range.as_sorted_char_range())
+        .map(|range| {
+            usize::from(range.start).min(char_count)..usize::from(range.end).min(char_count)
+        })
+        .unwrap_or(char_count..char_count);
 
-    let tag = if is_img {
-        format!("\n![{filename}]({rel_path})\n")
+    let safe_name = filename.replace([']', '['], " ");
+    let safe_path = rel_path
+        .replace(' ', "%20")
+        .replace('(', "%28")
+        .replace(')', "%29");
+    let link = if is_img {
+        format!("![{safe_name}]({safe_path})")
     } else {
-        format!("\n[{filename}]({rel_path})\n")
+        format!("[{safe_name}]({safe_path})")
     };
+    let start = char_to_byte(text, selection.start);
+    let end = char_to_byte(text, selection.end);
+    let prefix = if start == 0 || text[..start].ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    let suffix = if text[end..].starts_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    let tag = format!("{prefix}{link}{suffix}");
+    text.replace_range(start..end, &tag);
 
-    let byte_index = char_to_byte(text, char_index);
-    text.insert_str(byte_index, &tag);
-
-    let new_cursor = char_index + tag.chars().count();
+    // The inserted link has its own line. Leave the caret on the following line.
+    let new_cursor = selection.start + prefix.chars().count() + link.chars().count() + 1;
     state
         .cursor
         .set_char_range(Some(CCursorRange::one(CCursor::new(new_cursor))));
@@ -421,17 +514,19 @@ pub fn toggle_checkbox_at_character(text: &mut String, character_index: usize) -
     let line = &text[line_start..line_end];
     let indent = line.len() - line.trim_start().len();
     let marker_start = line_start + indent;
-    let marker_end = marker_start + 6;
+    let trimmed = &line[indent..];
+    let replacement = if trimmed.starts_with("- [ ] ") {
+        "- [x] "
+    } else if trimmed.starts_with("- [x] ") || trimmed.starts_with("- [X] ") {
+        "- [ ] "
+    } else {
+        return false;
+    };
+    // The recognized task markers are ASCII, so this is a valid UTF-8 boundary.
+    let marker_end = marker_start + "- [ ] ".len();
     if byte_index < marker_start || byte_index >= marker_end || marker_end > text.len() {
         return false;
     }
-
-    let marker = &text[marker_start..marker_end];
-    let replacement = match marker {
-        "- [ ] " => "- [x] ",
-        "- [x] " | "- [X] " => "- [ ] ",
-        _ => return false,
-    };
     text.replace_range(marker_start..marker_end, replacement);
     true
 }
@@ -443,11 +538,22 @@ fn line_at_character(text: &str, character_index: usize) -> usize {
         .count()
 }
 
+#[cfg(test)]
 fn highlight(
     source: &str,
     visuals: &Visuals,
     active_line: Option<usize>,
     body_size: f32,
+) -> LayoutJob {
+    highlight_with_images(source, visuals, active_line, body_size, &HashMap::new())
+}
+
+fn highlight_with_images(
+    source: &str,
+    visuals: &Visuals,
+    active_line: Option<usize>,
+    body_size: f32,
+    image_heights: &HashMap<usize, f32>,
 ) -> LayoutJob {
     let palette = Palette::new(visuals, body_size);
     let mut job = LayoutJob::default();
@@ -463,17 +569,79 @@ fn highlight(
             .strip_suffix('\n')
             .map_or((source_line, ""), |line| (line, "\n"));
 
-        append_line(
-            &mut job,
-            line,
-            &palette,
-            &mut inside_code_block,
-            active_line == Some(line_index),
-        );
+        if let Some(height) = image_heights.get(&line_index) {
+            append_image_line(
+                &mut job,
+                line,
+                &palette,
+                active_line == Some(line_index),
+                *height,
+            );
+        } else {
+            append_line(
+                &mut job,
+                line,
+                &palette,
+                &mut inside_code_block,
+                active_line == Some(line_index),
+            );
+        }
         append(&mut job, newline, palette.body.clone());
     }
 
     job
+}
+
+fn append_image_line(
+    job: &mut LayoutJob,
+    line: &str,
+    palette: &Palette,
+    active: bool,
+    height: f32,
+) {
+    let visible = palette.marker.clone();
+    let mut first = true;
+    if active {
+        append_image_text(job, line, visible, height, &mut first);
+        return;
+    }
+
+    let hidden = palette.hidden_marker.clone();
+    let leading = line.len() - line.trim_start().len();
+    let trimmed = line.trim();
+    let caption = if let Some(inner) = trimmed.strip_prefix("![") {
+        inner.find("](").map(|end| (leading + 2, leading + 2 + end))
+    } else if let Some(inner) = trimmed.strip_prefix("![[") {
+        inner.find("]]").map(|end| (leading + 3, leading + 3 + end))
+    } else {
+        None
+    };
+    if let Some((start, end)) = caption {
+        append_image_text(job, &line[..start], hidden.clone(), height, &mut first);
+        append_image_text(job, &line[start..end], visible, height, &mut first);
+        append_image_text(job, &line[end..], hidden, height, &mut first);
+    } else {
+        append_image_text(job, line, hidden, height, &mut first);
+    }
+}
+
+fn append_image_text(
+    job: &mut LayoutJob,
+    text: &str,
+    format: TextFormat,
+    height: f32,
+    first: &mut bool,
+) {
+    if *first && !text.is_empty() {
+        let first_char_end = text.chars().next().map_or(0, char::len_utf8);
+        let mut reserved = format.clone();
+        reserved.line_height = Some(height);
+        append(job, &text[..first_char_end], reserved);
+        append(job, &text[first_char_end..], format);
+        *first = false;
+    } else {
+        append(job, text, format);
+    }
 }
 
 struct Palette {
@@ -790,6 +958,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn attachment_inserts_at_caret_and_replaces_selection() {
+        let ctx = Context::default();
+        let id = Id::new("image_insertion");
+        let mut text = "Before after".to_owned();
+        set_cursor_char_index(&ctx, id, 7);
+        insert_attachment_link(
+            &ctx,
+            id,
+            &mut text,
+            "Screen shot",
+            "Attachments/Screen shot (1).png",
+            true,
+        );
+        assert_eq!(
+            text,
+            "Before \n![Screen shot](Attachments/Screen%20shot%20%281%29.png)\nafter"
+        );
+
+        let mut state = TextEditState::load(&ctx, id).unwrap();
+        state
+            .cursor
+            .set_char_range(Some(CCursorRange::two(CCursor::new(0), CCursor::new(6))));
+        state.store(&ctx, id);
+        insert_attachment_link(
+            &ctx,
+            id,
+            &mut text,
+            "Figure",
+            "Attachments/figure.png",
+            true,
+        );
+        assert!(text.starts_with("![Figure](Attachments/figure.png)\n"));
+        assert!(!text.starts_with("Before"));
+    }
+
+    #[test]
+    fn image_line_reserves_space_without_changing_editable_markdown() {
+        let source = "Before\n![Picture](Attachments/picture.png)\nAfter";
+        let heights = HashMap::from([(1, 180.0)]);
+        let job = highlight_with_images(source, &Visuals::dark(), None, 16.0, &heights);
+        assert_eq!(job.text, source);
+        assert_eq!(
+            job.sections
+                .iter()
+                .filter(|section| section.format.line_height == Some(180.0))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn highlighting_never_changes_the_source_text() {
         let source = "# Заголовок\n\n- **жирный** и `код`\n[[Другая заметка|ссылка]] 🦀\n";
         let job = highlight(source, &Visuals::dark(), None, 15.0);
@@ -830,6 +1049,18 @@ mod tests {
         assert!(toggle_checkbox_at_character(&mut text, 4));
         assert_eq!(text, "  - [x] task");
         assert!(!toggle_checkbox_at_character(&mut text, 10));
+    }
+
+    #[test]
+    fn checkbox_hit_testing_is_safe_on_cyrillic_text() {
+        let mut text = "Обычная русская строка\n- [ ] задача".to_owned();
+
+        assert!(!toggle_checkbox_at_character(&mut text, 3));
+        assert_eq!(text, "Обычная русская строка\n- [ ] задача");
+
+        let task_marker = "Обычная русская строка\n".chars().count() + 2;
+        assert!(toggle_checkbox_at_character(&mut text, task_marker));
+        assert_eq!(text, "Обычная русская строка\n- [x] задача");
     }
 
     #[test]

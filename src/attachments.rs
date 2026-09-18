@@ -226,6 +226,92 @@ impl AttachmentManager {
         orphans.sort();
         Ok(orphans)
     }
+
+    /// Reports missing, unsafe, and visibly malformed local attachment links without changing files.
+    pub fn diagnostics(notes: &[Note], notes_dir: &Path) -> Vec<String> {
+        const MAX_DIAGNOSTICS: usize = 200;
+        let mut diagnostics = Vec::new();
+        for note in notes {
+            let note_label = if note.title.trim().is_empty() {
+                note.file_path.display().to_string()
+            } else {
+                note.title.clone()
+            };
+
+            for (line_index, line) in note.content.lines().enumerate() {
+                if attachment_syntax_is_malformed(line) {
+                    diagnostics.push(format!(
+                        "Malformed attachment link in {note_label}, line {}",
+                        line_index + 1
+                    ));
+                }
+                if diagnostics.len() >= MAX_DIAGNOSTICS {
+                    return diagnostics;
+                }
+            }
+
+            let references = extract_attachments_from_markdown(&note.content)
+                .into_iter()
+                .map(|path| decode_url_path(&path))
+                .collect::<HashSet<_>>();
+            for reference in references {
+                let relative = Path::new(reference.trim());
+                if relative.as_os_str().is_empty()
+                    || relative.is_absolute()
+                    || !relative
+                        .components()
+                        .all(|component| matches!(component, Component::Normal(_)))
+                {
+                    diagnostics.push(format!(
+                        "Unsafe attachment path in {note_label}: {reference}"
+                    ));
+                    continue;
+                }
+
+                let beside_note = note.file_path.parent().unwrap_or(notes_dir).join(relative);
+                let from_vault_root = notes_dir.join(relative);
+                if !beside_note.is_file() && !from_vault_root.is_file() {
+                    diagnostics.push(format!(
+                        "Missing attachment referenced by {note_label}: {reference}"
+                    ));
+                }
+                if diagnostics.len() >= MAX_DIAGNOSTICS {
+                    return diagnostics;
+                }
+            }
+        }
+        diagnostics
+    }
+}
+
+fn attachment_syntax_is_malformed(line: &str) -> bool {
+    if let Some(start) = line.find("![[") {
+        let rest = &line[start + 3..];
+        if !rest.contains("]]") || rest.starts_with("]]") {
+            return true;
+        }
+    }
+
+    let mut offset = 0;
+    while let Some(start) = line[offset..].find("![") {
+        let rest = &line[offset + start + 2..];
+        if rest.starts_with('[') {
+            offset += start + 3;
+            continue;
+        }
+        let Some(label_end) = rest.find("](") else {
+            return true;
+        };
+        let target = &rest[label_end + 2..];
+        let Some(target_end) = target.find(')') else {
+            return true;
+        };
+        if target[..target_end].trim().is_empty() {
+            return true;
+        }
+        offset += start + 2 + label_end + 2 + target_end + 1;
+    }
+    false
 }
 
 fn open_clipboard_with_retry() -> Result<arboard::Clipboard, String> {
@@ -489,5 +575,39 @@ And external: ![Web](https://example.com/logo.png)
             AttachmentManager::save_clipboard_image(&image_data, notes_dir, folder_name).unwrap();
         assert!(rel.starts_with("Attachments/Pasted Image "));
         assert!(notes_dir.join(&rel).exists());
+    }
+
+    #[test]
+    fn diagnostics_reports_missing_and_malformed_attachments() {
+        let dir = tempdir().unwrap();
+        let mut note = Note::new_named(dir.path(), "Broken media");
+        note.content = "![Missing](Attachments/nope.png)\n![[unfinished.png".to_owned();
+
+        let diagnostics = AttachmentManager::diagnostics(&[note], dir.path());
+
+        assert!(
+            diagnostics
+                .iter()
+                .any(|item| item.contains("Missing attachment"))
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|item| item.contains("Malformed attachment"))
+        );
+    }
+
+    #[test]
+    fn diagnostics_accepts_vault_root_and_note_relative_files() {
+        let dir = tempdir().unwrap();
+        let nested = dir.path().join("Projects");
+        fs::create_dir_all(&nested).unwrap();
+        fs::create_dir_all(dir.path().join("Attachments")).unwrap();
+        fs::write(nested.join("local.png"), b"local").unwrap();
+        fs::write(dir.path().join("Attachments/root.png"), b"root").unwrap();
+        let mut note = Note::new_named(&nested, "Media");
+        note.content = "![Local](local.png)\n![Root](Attachments/root.png)".to_owned();
+
+        assert!(AttachmentManager::diagnostics(&[note], dir.path()).is_empty());
     }
 }

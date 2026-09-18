@@ -10,6 +10,7 @@ mod global_hotkey;
 mod graph;
 mod links;
 mod markdown;
+mod note_preview;
 mod platform;
 mod quick_capture;
 mod search;
@@ -17,6 +18,7 @@ mod storage;
 mod tags;
 mod templates;
 mod ui_style;
+mod vault_watch;
 
 use eframe::egui;
 
@@ -39,6 +41,8 @@ fn main() -> eframe::Result {
     let native_options = eframe::NativeOptions {
         viewport,
         persist_window: true,
+        persistence_path: std::env::var_os("LILO_DATA_DIR")
+            .map(|path| std::path::PathBuf::from(path).join("window.ron")),
         ..Default::default()
     };
     eframe::run_native(
