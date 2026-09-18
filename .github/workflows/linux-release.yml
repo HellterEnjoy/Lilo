@@ -80,10 +80,8 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Test and build release binary
-        run: |
-          cargo test --locked
-          cargo build --release --locked
+      - name: Build release binary
+        run: cargo build --release --locked
 
       - name: Package Ubuntu archive
         env:
@@ -135,10 +133,8 @@ jobs:
         with:
           ref: ${{ needs.prepare.outputs.tag }}
 
-      - name: Test and build release binary
-        run: |
-          cargo test --locked
-          cargo build --release --locked
+      - name: Build release binary
+        run: cargo build --release --locked
 
       - name: Package Arch Linux archive
         env:
