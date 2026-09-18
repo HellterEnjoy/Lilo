@@ -90,30 +90,14 @@ jobs:
             throw 'GitHub release publishing failed.'
           }
 
-      - name: Download WinGetCreate
-        if: ${{ env.WINGET_GITHUB_TOKEN != '' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_winget)) }}
-        shell: pwsh
-        run: Invoke-WebRequest 'https://aka.ms/wingetcreate/latest' -OutFile "$env:RUNNER_TEMP\wingetcreate.exe"
-
       - name: Submit WinGet update
         if: ${{ env.WINGET_GITHUB_TOKEN != '' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_winget)) }}
         shell: pwsh
         run: |
-          $version = '${{ steps.version.outputs.version }}'
-          $tag = '${{ steps.version.outputs.tag }}'
-          $installerUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/Lilo-$version-windows-x64-setup.exe"
-          $releaseNotesUrl = "https://github.com/${{ github.repository }}/releases/tag/$tag"
-
-          & "$env:RUNNER_TEMP\wingetcreate.exe" update HellterEnjoy.Lilo `
-            --version $version `
-            --urls $installerUrl `
-            --release-notes-url $releaseNotesUrl `
-            --submit `
-            --token $env:WINGET_GITHUB_TOKEN `
-            --no-open
-          if ($LASTEXITCODE -ne 0) {
-            throw "WinGet submission failed with exit code $LASTEXITCODE."
-          }
+          .\scripts\submit-winget.ps1 `
+            -Version '${{ steps.version.outputs.version }}' `
+            -Tag '${{ steps.version.outputs.tag }}' `
+            -Repository '${{ github.repository }}'
 
       - name: Explain skipped WinGet submission
         if: ${{ env.WINGET_GITHUB_TOKEN == '' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_winget)) }}

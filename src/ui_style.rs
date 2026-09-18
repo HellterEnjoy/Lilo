@@ -11,24 +11,14 @@ pub const TOOL_SIZE: f32 = 30.0;
 pub const PANEL_MARGIN: i8 = 12;
 pub const COMPACT_WIDTH: f32 = 600.0;
 pub const WIDE_BREAKPOINT: f32 = 1100.0;
-#[allow(dead_code)]
-pub const EDITOR_SHEET_MAX_WIDTH: f32 = 780.0;
 
 pub const NAV_BREAKPOINT: f32 = 600.0;
-#[allow(dead_code)]
-pub const EXPANDED_NAV_BREAKPOINT: f32 = 960.0;
-#[allow(dead_code)]
-pub const NAV_RAIL_WIDTH: f32 = 52.0;
-#[allow(dead_code)]
-pub const NAV_PANEL_WIDTH: f32 = 260.0;
 pub const INSPECTOR_PANEL_WIDTH: f32 = 250.0;
 
 #[derive(Clone, Copy)]
-#[allow(dead_code)]
 pub enum Icon {
     Search,
     Pin,
-    Editor,
     Notes,
     Graph,
     Trash,
@@ -41,11 +31,7 @@ pub enum Icon {
     Close,
     SidebarLeft,
     SidebarRight,
-    Outline,
-    Backlinks,
-    Tag,
     Calendar,
-    Daily,
     Inbox,
 }
 
@@ -112,22 +98,6 @@ fn paint_icon(ui: &Ui, rect: Rect, icon: Icon, color: Color32) {
             painter.line_segment(
                 [center + Vec2::new(0.0, 1.0), center + Vec2::new(0.0, 8.0)],
                 stroke,
-            );
-        }
-        Icon::Editor => {
-            painter.line_segment(
-                [center + Vec2::new(-5.0, 5.0), center + Vec2::new(5.0, -5.0)],
-                stroke,
-            );
-            painter.line_segment(
-                [center + Vec2::new(-6.0, 6.0), center + Vec2::new(-2.0, 5.0)],
-                stroke,
-            );
-            painter.rect_stroke(
-                Rect::from_center_size(center, Vec2::splat(15.0)),
-                CornerRadius::same(3),
-                Stroke::new(1.0, color.gamma_multiply(0.55)),
-                StrokeKind::Inside,
             );
         }
         Icon::Notes => {
@@ -277,60 +247,6 @@ fn paint_icon(ui: &Ui, rect: Rect, icon: Icon, color: Color32) {
                 stroke,
             );
         }
-        Icon::Outline => {
-            for (y, w) in [(-5.0, 12.0), (-1.0, 8.0), (3.0, 10.0), (7.0, 6.0)] {
-                painter.line_segment(
-                    [center + Vec2::new(-6.0, y), center + Vec2::new(-6.0 + w, y)],
-                    stroke,
-                );
-            }
-        }
-        Icon::Backlinks => {
-            painter.line_segment(
-                [center + Vec2::new(-6.0, 0.0), center + Vec2::new(6.0, 0.0)],
-                stroke,
-            );
-            painter.line_segment(
-                [
-                    center + Vec2::new(-3.0, -4.0),
-                    center + Vec2::new(-6.0, 0.0),
-                ],
-                stroke,
-            );
-            painter.line_segment(
-                [center + Vec2::new(-3.0, 4.0), center + Vec2::new(-6.0, 0.0)],
-                stroke,
-            );
-        }
-        Icon::Tag => {
-            painter.line_segment(
-                [
-                    center + Vec2::new(-6.0, -6.0),
-                    center + Vec2::new(2.0, -6.0),
-                ],
-                stroke,
-            );
-            painter.line_segment(
-                [center + Vec2::new(2.0, -6.0), center + Vec2::new(6.0, -2.0)],
-                stroke,
-            );
-            painter.line_segment(
-                [center + Vec2::new(6.0, -2.0), center + Vec2::new(-2.0, 6.0)],
-                stroke,
-            );
-            painter.line_segment(
-                [center + Vec2::new(-2.0, 6.0), center + Vec2::new(-6.0, 2.0)],
-                stroke,
-            );
-            painter.line_segment(
-                [
-                    center + Vec2::new(-6.0, 2.0),
-                    center + Vec2::new(-6.0, -6.0),
-                ],
-                stroke,
-            );
-            painter.circle_filled(center + Vec2::new(-2.0, -2.0), 1.5, color);
-        }
         Icon::Calendar => {
             painter.rect_stroke(
                 Rect::from_center_size(center, Vec2::new(14.0, 14.0)),
@@ -356,15 +272,6 @@ fn paint_icon(ui: &Ui, rect: Rect, icon: Icon, color: Color32) {
                 [center + Vec2::new(4.0, -7.0), center + Vec2::new(4.0, -5.0)],
                 stroke,
             );
-        }
-        Icon::Daily => {
-            painter.rect_stroke(
-                Rect::from_center_size(center, Vec2::new(14.0, 14.0)),
-                CornerRadius::same(3),
-                stroke,
-                StrokeKind::Inside,
-            );
-            painter.circle_filled(center + Vec2::new(0.0, 1.0), 2.2, color);
         }
         Icon::Inbox => {
             painter.rect_stroke(
@@ -717,24 +624,6 @@ pub fn card_frame(ui: &Ui) -> egui::Frame {
         .inner_margin(egui::Margin::symmetric(10, 8))
 }
 
-#[allow(dead_code)]
-pub fn sheet_frame(ui: &Ui) -> egui::Frame {
-    egui::Frame::new()
-        .fill(ui.visuals().window_fill)
-        .stroke(Stroke::new(
-            1.0,
-            ui.visuals().widgets.inactive.bg_stroke.color,
-        ))
-        .corner_radius(CornerRadius::same(12))
-        .inner_margin(egui::Margin::symmetric(24, 20))
-        .shadow(egui::Shadow {
-            offset: [0, 4],
-            blur: 16,
-            spread: 0,
-            color: Color32::from_black_alpha(100),
-        })
-}
-
 pub fn paint_resize_grip(ui: &mut Ui) {
     let rect = ui.available_rect_before_wrap();
     let br = rect.max;
@@ -832,15 +721,6 @@ pub fn highlighted_terms(
         );
     }
     job
-}
-
-#[allow(dead_code)]
-pub fn status_color(visuals: &egui::Visuals, is_error: bool) -> Color32 {
-    if is_error {
-        visuals.error_fg_color
-    } else {
-        visuals.hyperlink_color
-    }
 }
 
 #[cfg(test)]

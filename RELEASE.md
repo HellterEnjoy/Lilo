@@ -54,6 +54,8 @@ WinGet users can use the upgrade command above. Windows installer users can run 
 
 Application files, settings and vault data are separate. Updating or uninstalling Lilo does not remove notes. Keep a current export when the vault matters.
 
+Direct upgrade of application settings is supported from Lilo 0.2.0 and newer. Markdown notes remain portable and can always be opened as regular files. If `settings.json` is damaged, Lilo preserves it beside the original name with a unique `.invalid-<timestamp>.bak` suffix, reports the problem and starts with current defaults.
+
 ## Vaults and recovery
 
 New vaults use the directory selected by the user as the Markdown root. Lilo stores its recoverable application data under `.lilo/`:
@@ -88,4 +90,4 @@ The packaging script creates the Windows installer, portable ZIP and SHA-256 fil
 
 Pushing a `v<version>` tag runs `.github/workflows/release.yml`. The workflow verifies the tag against `Cargo.toml`, runs checks, publishes Windows artifacts and submits the matching WinGet update when `WINGET_GITHUB_TOKEN` is configured. Linux archives are uploaded to the same release after native verification.
 
-The initial WinGet package is already published. A manually dispatched release can include or skip WinGet with its `publish_winget` option. If an automatic submission needs to be retried, run `.github/workflows/winget.yml` with the released version. Both paths use `wingetcreate update HellterEnjoy.Lilo` and require the `WINGET_GITHUB_TOKEN` Actions secret.
+The initial WinGet package is already published. A manually dispatched release can include or skip WinGet with its `publish_winget` option. If an automatic submission needs to be retried, run `.github/workflows/winget.yml` with the released version. Both paths call `scripts/submit-winget.ps1`, use package ID `HellterEnjoy.Lilo` and require the `WINGET_GITHUB_TOKEN` Actions secret.

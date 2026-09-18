@@ -13,18 +13,6 @@ impl LocalDateService {
         Local::now().date_naive()
     }
 
-    /// Returns yesterday's local date.
-    #[allow(dead_code)]
-    pub fn yesterday() -> NaiveDate {
-        Self::today() - Duration::days(1)
-    }
-
-    /// Returns tomorrow's local date.
-    #[allow(dead_code)]
-    pub fn tomorrow() -> NaiveDate {
-        Self::today() + Duration::days(1)
-    }
-
     /// Returns current local timestamp.
     pub fn now() -> DateTime<Local> {
         Local::now()
@@ -172,8 +160,8 @@ mod tests {
     #[test]
     fn local_date_service_provides_consecutive_days() {
         let today = LocalDateService::today();
-        let yesterday = LocalDateService::yesterday();
-        let tomorrow = LocalDateService::tomorrow();
+        let yesterday = LocalDateService::prev_day(today);
+        let tomorrow = LocalDateService::next_day(today);
 
         assert_eq!(yesterday + Duration::days(1), today);
         assert_eq!(today + Duration::days(1), tomorrow);

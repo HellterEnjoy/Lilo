@@ -25,6 +25,6 @@ The test suite includes regression workloads for:
 - a Markdown note larger than the live-highlighting threshold;
 - Unicode selections, lists, backups, import, direct-root vaults and full-vault export;
 - Cyrillic checkbox hit-testing and inline image placement without changing Markdown source;
-- legacy settings migration, interrupted atomic writes and partial read-only batches.
+- supported settings migration, corrupt-config recovery, interrupted atomic writes and partial read-only batches.
 
 The large-vault and dense-graph tests use a generous ten-second ceiling. This is a regression limit for varied development machines, not a claim that normal operation should take ten seconds. Run all checks with `cargo test`; use a release build for representative manual UI profiling.

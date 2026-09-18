@@ -85,7 +85,7 @@ impl WidgetApp {
             )
             .clicked()
             {
-                self.toggle_explorer();
+                self.handle_command_action(CommandAction::ToggleLeftSidebar);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui_style::icon_button(ui, Icon::Close, false, "Close Lilo").clicked() {
@@ -111,7 +111,7 @@ impl WidgetApp {
                     )
                     .clicked()
                 {
-                    self.toggle_inspector();
+                    self.handle_command_action(CommandAction::ToggleRightInspector);
                 }
                 if !self.settings.left_sidebar_open
                     && ui_style::icon_button(ui, Icon::Search, false, "Search (Ctrl+K)").clicked()

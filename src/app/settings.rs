@@ -66,7 +66,6 @@ impl WidgetApp {
             if self.settings_section == 6 {
                 ui.heading("Editor");
                 ui.add(egui::Slider::new(&mut self.settings.editor_font_size, 12.0..=32.0).text("Font size"));
-                self.settings.font_size = self.settings.editor_font_size;
                 ui.add(egui::Slider::new(&mut self.settings.editor_max_width, 600.0..=1600.0).text("Maximum line width"));
                 ui_style::muted(ui, "The editor uses the available space up to this width. Ctrl + / − adjusts text size.");
                 ui.checkbox(&mut self.settings.show_status_bar, "Show save status and word count");

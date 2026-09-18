@@ -433,19 +433,18 @@ impl WidgetApp {
                                                             ui.add_space(16.0);
 
                                                             ui.horizontal_wrapped(|ui| {
-                                                                if ui.button("Open storage folder…").clicked() { self.choose_vault_folder(); }
+                                                                if ui.button("Open storage folder…").clicked() { self.handle_command_action(CommandAction::SwitchVault); }
                                                                 if ui.button("Create your first note").clicked() {
-                                                                    self.create_note();
+                                                                    self.handle_command_action(CommandAction::NewNote);
                                                                 }
                                                                 if ui.button("📅 Today's Note (Alt+D)").clicked() {
-                                                                    self.open_or_create_daily_note(0);
+                                                                    self.handle_command_action(CommandAction::OpenTodayNote);
                                                                 }
                                                                 if ui.button("⚡ Quick Capture (Ctrl+Shift+C)").clicked() {
-                                                                    self.quick_capture_state.open();
+                                                                    self.handle_command_action(CommandAction::QuickCapture);
                                                                 }
                                                                 if ui.button("📝 Templates...").clicked() {
-                                                                    self.template_selector_open = true;
-                                                                    self.template_selector_for_new_note = true;
+                                                                    self.handle_command_action(CommandAction::NewNoteFromTemplate);
                                                                 }
                                                                 if ui.button("🔍 Commands (Ctrl+P)").clicked() {
                                                                     self.command_palette_state.open();

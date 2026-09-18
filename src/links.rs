@@ -349,44 +349,6 @@ fn is_escaped(source: &str, marker_start: usize) -> bool {
         == 1
 }
 
-#[allow(dead_code)]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct UnresolvedLinkEntry {
-    pub target: String,
-    pub referencing_notes: Vec<(Uuid, String)>,
-}
-
-/// Collects all unresolved wiki-links across all notes in the vault.
-#[allow(dead_code)]
-pub fn collect_all_unresolved_links(
-    notes: &[Note],
-    link_index: &LinkIndex,
-) -> Vec<UnresolvedLinkEntry> {
-    let mut map: HashMap<String, Vec<(Uuid, String)>> = HashMap::new();
-
-    for note in notes {
-        if let Some(links) = link_index.links_for(note.id) {
-            for target in &links.unresolved {
-                let entry = map.entry(target.clone()).or_default();
-                if !entry.iter().any(|(id, _)| *id == note.id) {
-                    entry.push((note.id, note.title.clone()));
-                }
-            }
-        }
-    }
-
-    let mut result: Vec<UnresolvedLinkEntry> = map
-        .into_iter()
-        .map(|(target, referencing_notes)| UnresolvedLinkEntry {
-            target,
-            referencing_notes,
-        })
-        .collect();
-
-    result.sort_by(|a, b| a.target.cmp(&b.target));
-    result
-}
-
 /// Replaces references to an old note title with a new title across all notes in the vault.
 /// Handles `[[old_title]]`, `[[old_title|alias]]`, `[[old_title#heading]]`, `[[old_title#heading|alias]]`, and `[[folder/old_title]]`.
 /// Returns every modified note so the caller can persist all changed files.
@@ -616,23 +578,5 @@ mod tests {
 
         assert_eq!(affected, vec![notes[0].id]);
         assert_eq!(notes[0].content, original);
-    }
-
-    #[test]
-    fn collects_unresolved_links_across_vault() {
-        let note1 = note(
-            "Alpha",
-            &[],
-            "Links to [[Dead Link]] and [[Missing Target]].",
-        );
-        let note2 = note("Beta", &[], "Also links to [[Dead Link]].");
-        let index = LinkIndex::build(&[note1.clone(), note2.clone()], Path::new(""));
-
-        let unresolved = collect_all_unresolved_links(&[note1, note2], &index);
-        assert_eq!(unresolved.len(), 2);
-        assert_eq!(unresolved[0].target, "Dead Link");
-        assert_eq!(unresolved[0].referencing_notes.len(), 2);
-        assert_eq!(unresolved[1].target, "Missing Target");
-        assert_eq!(unresolved[1].referencing_notes.len(), 1);
     }
 }

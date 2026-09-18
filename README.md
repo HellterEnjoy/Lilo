@@ -101,7 +101,7 @@ GitHub Releases provide x86-64 archives for Ubuntu 22.04+ and current Arch Linux
 | New note | `Ctrl+N` |
 | Save | `Ctrl+S` |
 | Editor / Notes / Graph | `Ctrl+1` / `Ctrl+2` / `Ctrl+3` |
-| Explorer / Inspector | `Ctrl+B` / `Ctrl+I` |
+| Explorer / Inspector | `Ctrl+Shift+B` / `Ctrl+Shift+I` |
 | Zen mode | `F11` |
 
 Shortcuts can be changed in Settings. The system-wide Quick Capture shortcut is currently Windows-only.

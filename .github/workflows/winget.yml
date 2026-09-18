@@ -18,36 +18,12 @@ jobs:
       WINGET_GITHUB_TOKEN: ${{ secrets.WINGET_GITHUB_TOKEN }}
 
     steps:
-      - name: Require submission token
-        shell: pwsh
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:WINGET_GITHUB_TOKEN)) {
-            throw 'Add a WINGET_GITHUB_TOKEN repository secret before running this workflow.'
-          }
-
-      - name: Download WinGetCreate
-        shell: pwsh
-        run: Invoke-WebRequest 'https://aka.ms/wingetcreate/latest' -OutFile "$env:RUNNER_TEMP\wingetcreate.exe"
+      - name: Check out source
+        uses: actions/checkout@v4
 
       - name: Submit WinGet update
         shell: pwsh
         run: |
-          $version = '${{ inputs.version }}'
-          if ($version -notmatch '^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$') {
-            throw "Version '$version' is invalid. Pass it without the v prefix."
-          }
-
-          $tag = "v$version"
-          $installerUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/Lilo-$version-windows-x64-setup.exe"
-          $releaseNotesUrl = "https://github.com/${{ github.repository }}/releases/tag/$tag"
-
-          & "$env:RUNNER_TEMP\wingetcreate.exe" update HellterEnjoy.Lilo `
-            --version $version `
-            --urls $installerUrl `
-            --release-notes-url $releaseNotesUrl `
-            --submit `
-            --token $env:WINGET_GITHUB_TOKEN `
-            --no-open
-          if ($LASTEXITCODE -ne 0) {
-            throw "WinGet submission failed with exit code $LASTEXITCODE."
-          }
+          .\scripts\submit-winget.ps1 `
+            -Version '${{ inputs.version }}' `
+            -Repository '${{ github.repository }}'

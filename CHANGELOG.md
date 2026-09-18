@@ -17,8 +17,14 @@
 - made tags added from Properties refresh the explorer immediately and normalized new tag names;
 - fixed a Unicode boundary panic when checkbox hit-testing ordinary Cyrillic text;
 - removed the legacy movable navigation layer and stale persisted egui layout from the redesigned shell;
+- split application orchestration and storage into focused modules while keeping their public facades stable;
+- routed shared menu, toolbar, compact-mode, palette and keyboard actions through `CommandAction`;
+- removed navigation settings and migration state used only before the supported 0.2.0 settings boundary;
+- kept Markdown notes, images, attachments and folders independent from application-settings compatibility;
 - refreshed the English showcase notes and replaced all four project screenshots;
 - documented the now-live WinGet package `HellterEnjoy.Lilo` and simplified the project documentation.
+
+Direct upgrade of application settings is supported from Lilo 0.2.0 and newer. Markdown notes remain portable and can always be opened as regular files.
 
 ## 0.2.1 — Transparent Analytics and Responsiveness
 

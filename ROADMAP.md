@@ -50,7 +50,7 @@ The initial WinGet package is now live as `HellterEnjoy.Lilo`. Remaining work:
 Every release should preserve:
 
 - ordinary Markdown as the source of truth;
-- backward-compatible vault and settings migration;
+- backward-compatible vault handling and direct settings upgrades from Lilo 0.2.0 or newer;
 - backups and review before destructive or vault-wide changes;
 - a usable compact workflow;
 - Windows and Linux automated checks;

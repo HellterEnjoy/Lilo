@@ -15,19 +15,13 @@ use std::sync::Arc;
 const HIDDEN_MARKER_SIZE: f32 = 0.1;
 const MAX_HIGHLIGHT_BYTES: usize = 512 * 1024;
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MarkdownCommand {
     Bold,
     Italic,
     InlineCode,
-    CodeBlock,
     WikiLink,
-    Heading,
-    Bullet,
     Task,
-    Indent,
-    Outdent,
 }
 
 #[derive(Clone)]
@@ -247,13 +241,8 @@ pub fn apply_command(ctx: &Context, id: Id, text: &mut String, command: Markdown
         MarkdownCommand::Bold => wrap_selection(text, selected, "**", "**", "bold text"),
         MarkdownCommand::Italic => wrap_selection(text, selected, "*", "*", "italic text"),
         MarkdownCommand::InlineCode => wrap_selection(text, selected, "`", "`", "code"),
-        MarkdownCommand::CodeBlock => wrap_selection(text, selected, "```\n", "\n```", "code"),
         MarkdownCommand::WikiLink => wrap_selection(text, selected, "[[", "]]", "Note"),
-        MarkdownCommand::Heading => edit_selected_lines(text, selected, LineEdit::Toggle("# ")),
-        MarkdownCommand::Bullet => edit_selected_lines(text, selected, LineEdit::Toggle("- ")),
         MarkdownCommand::Task => edit_selected_lines(text, selected, LineEdit::Toggle("- [ ] ")),
-        MarkdownCommand::Indent => edit_selected_lines(text, selected, LineEdit::Indent),
-        MarkdownCommand::Outdent => edit_selected_lines(text, selected, LineEdit::Outdent),
     };
     state.cursor.set_char_range(Some(CCursorRange::two(
         CCursor::new(new_selection.start),
@@ -360,8 +349,6 @@ pub fn insert_attachment_link(
 #[derive(Clone, Copy)]
 enum LineEdit {
     Toggle(&'static str),
-    Indent,
-    Outdent,
 }
 
 fn wrap_selection(
@@ -422,18 +409,6 @@ fn edit_line(line: &str, edit: LineEdit) -> String {
         .strip_suffix('\n')
         .map_or((line, ""), |content| (content, "\n"));
     match edit {
-        LineEdit::Indent => format!("    {content}{newline}"),
-        LineEdit::Outdent => {
-            let trimmed = content.strip_prefix('\t').unwrap_or_else(|| {
-                let spaces = content
-                    .bytes()
-                    .take_while(|byte| *byte == b' ')
-                    .count()
-                    .min(4);
-                &content[spaces..]
-            });
-            format!("{trimmed}{newline}")
-        }
         LineEdit::Toggle(marker) => {
             let indent_bytes = content.len() - content.trim_start().len();
             let (indent, body) = content.split_at(indent_bytes);
@@ -1074,13 +1049,10 @@ mod tests {
     }
 
     #[test]
-    fn line_actions_indent_and_toggle_tasks() {
+    fn line_action_toggles_tasks_for_a_multi_line_selection() {
         let mut text = "first\nsecond\n".to_owned();
-        let selection = edit_selected_lines(&mut text, 0..12, LineEdit::Toggle("- [ ] "));
+        edit_selected_lines(&mut text, 0..12, LineEdit::Toggle("- [ ] "));
         assert_eq!(text, "- [ ] first\n- [ ] second\n");
-
-        edit_selected_lines(&mut text, selection, LineEdit::Indent);
-        assert_eq!(text, "    - [ ] first\n    - [ ] second\n");
     }
 
     #[test]

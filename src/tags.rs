@@ -22,8 +22,6 @@ pub struct TagTreeNode {
 
 #[derive(Default, Clone, Debug)]
 pub struct TagIndex {
-    #[allow(dead_code)]
-    by_tag: HashMap<String, Vec<Uuid>>,
     all_tags: Vec<TagInfo>,
 }
 
@@ -53,17 +51,11 @@ impl TagIndex {
 
         all_tags.sort_by(|a, b| a.tag.cmp(&b.tag));
 
-        Self { by_tag, all_tags }
+        Self { all_tags }
     }
 
     pub fn all_tags(&self) -> &[TagInfo] {
         &self.all_tags
-    }
-
-    #[allow(dead_code)]
-    pub fn notes_for_tag(&self, tag: &str) -> Option<&[Uuid]> {
-        let clean = clean_tag(tag);
-        self.by_tag.get(&clean).map(Vec::as_slice)
     }
 
     /// Builds a hierarchical tree for nested tags like `#project/lilo/release`.
@@ -395,8 +387,6 @@ mod tests {
         let dev_node = tree.iter().find(|n| n.name == "dev").unwrap();
         assert_eq!(dev_node.count, 3);
         assert_eq!(dev_node.children.len(), 2); // "go" and "rust"
-        assert_eq!(index.notes_for_tag("daily").unwrap().len(), 1);
-        assert_eq!(index.notes_for_tag("dev/rust/async").unwrap().len(), 1);
     }
 
     #[test]
