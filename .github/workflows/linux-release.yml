@@ -1,0 +1,196 @@
+name: Release Linux packages
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag, for example v0.2.2
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - name: Resolve and verify version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          if [[ ! "$tag" =~ ^v([0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?)$ ]]; then
+            echo "Release tag '$tag' must use the vX.Y.Z format." >&2
+            exit 1
+          fi
+          version="${BASH_REMATCH[1]}"
+          cargo_version="$(sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]+)"/\1/p' Cargo.toml | head -n 1)"
+          if [[ "$cargo_version" != "$version" ]]; then
+            echo "Tag version '$version' does not match Cargo.toml version '$cargo_version'." >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  ubuntu:
+    name: Ubuntu 22.04 package
+    needs: prepare
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            libssl-dev \
+            libwayland-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            pkg-config
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Test and build release binary
+        run: |
+          cargo test --locked
+          cargo build --release --locked
+
+      - name: Package Ubuntu archive
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          package="Lilo-${VERSION}-ubuntu-22.04-x86_64"
+          mkdir -p "dist/$package"
+          install -m 755 target/release/Lilo "dist/$package/Lilo"
+          for document in README.md ROADMAP.md CHANGELOG.md RELEASE.md PRIVACY.md LICENSE; do
+            install -m 644 "$document" "dist/$package/$document"
+          done
+          tar -C dist -czf "dist/$package.tar.gz" "$package"
+          (cd dist && sha256sum "$package.tar.gz" > "$package.tar.gz.sha256")
+
+      - name: Upload Ubuntu archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-ubuntu-22.04
+          path: |
+            dist/Lilo-${{ needs.prepare.outputs.version }}-ubuntu-22.04-x86_64.tar.gz
+            dist/Lilo-${{ needs.prepare.outputs.version }}-ubuntu-22.04-x86_64.tar.gz.sha256
+          if-no-files-found: error
+
+  arch:
+    name: Arch Linux package
+    needs: prepare
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            base-devel \
+            ca-certificates \
+            cargo \
+            git \
+            libxcb \
+            libxkbcommon-x11 \
+            openssl \
+            pkgconf \
+            rust \
+            wayland
+
+      - name: Check out tagged source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Test and build release binary
+        run: |
+          cargo test --locked
+          cargo build --release --locked
+
+      - name: Package Arch Linux archive
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          package="Lilo-${VERSION}-arch-x86_64"
+          mkdir -p "dist/$package"
+          install -m 755 target/release/Lilo "dist/$package/Lilo"
+          for document in README.md ROADMAP.md CHANGELOG.md RELEASE.md PRIVACY.md LICENSE; do
+            install -m 644 "$document" "dist/$package/$document"
+          done
+          tar -C dist -czf "dist/$package.tar.gz" "$package"
+          (cd dist && sha256sum "$package.tar.gz" > "$package.tar.gz.sha256")
+
+      - name: Upload Arch Linux archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-arch
+          path: |
+            dist/Lilo-${{ needs.prepare.outputs.version }}-arch-x86_64.tar.gz
+            dist/Lilo-${{ needs.prepare.outputs.version }}-arch-x86_64.tar.gz.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Upload Linux release assets
+    needs:
+      - prepare
+      - ubuntu
+      - arch
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Download packaged archives
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Wait for and update GitHub release
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 90); do
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              gh release upload "$TAG" dist/* --clobber
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "GitHub release '$TAG' was not created within 15 minutes." >&2
+          exit 1
