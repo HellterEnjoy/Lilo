@@ -1,6 +1,6 @@
 use super::*;
 
-impl WidgetApp {
+impl LiloApp {
     pub(super) fn show_compact_header(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let title = ui.add(
@@ -64,10 +64,9 @@ impl WidgetApp {
                     };
                     ui_style::muted(ui, save_status);
 
-                    if total_width >= 560.0 {
+                    if total_width >= 460.0 {
                         ui.add_space(8.0);
-                        let (words, chars) = markdown::count_words_and_chars(&note.content);
-                        ui_style::muted(ui, format!("Words: {words}  ·  Chars: {chars}"));
+                        self.show_note_statistics(ui, note, total_width >= 720.0);
                     }
                 }
 
@@ -183,7 +182,10 @@ impl WidgetApp {
         let window_width = ui.available_width();
         self.viewport_width = window_width;
 
-        if !self.command_palette_state.is_open && !self.quick_capture_state.is_open {
+        if !self.command_palette_state.is_open
+            && !self.quick_capture_state.is_open
+            && !self.quick_switcher.is_open
+        {
             if shortcut_pressed(&ctx, "Ctrl+Shift+I") {
                 self.handle_command_action(CommandAction::ToggleRightInspector);
             }
@@ -271,6 +273,27 @@ impl WidgetApp {
             if daily_note_shortcut {
                 self.handle_command_action(CommandAction::OpenTodayNote);
             }
+            if shortcut_pressed(&ctx, "Ctrl+O") {
+                self.handle_command_action(CommandAction::QuickSwitcher);
+            }
+            let find_shortcut = shortcut_pressed(&ctx, "Ctrl+F");
+            let replace_shortcut = shortcut_pressed(&ctx, "Ctrl+H");
+            if replace_shortcut {
+                // egui's TextEdit treats Ctrl+H as Backspace; keep it from editing the note.
+                ctx.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::H));
+            }
+            if (find_shortcut || replace_shortcut)
+                && let Some(note) = self.data.selected_note()
+            {
+                let prefill = status::editor_selection(&ctx, note.id)
+                    .map(|range| crate::editor_tools::char_slice(&note.content, range).to_owned());
+                self.handle_command_action(if replace_shortcut {
+                    CommandAction::ReplaceInNote
+                } else {
+                    CommandAction::FindInNote
+                });
+                self.find.open_bar(replace_shortcut, prefill);
+            }
 
             let direct_view = ctx.input(|input| {
                 if !input.modifiers.ctrl || input.modifiers.alt || input.modifiers.shift {
@@ -357,20 +380,24 @@ impl WidgetApp {
                 self.handle_command_action(CommandAction::SaveNote);
             }
             if escape_pressed {
-                if self.command_palette_state.is_open {
+                if self.completion.is_visible() {
+                    ctx.input_mut(|input| {
+                        input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                    });
+                    self.completion.dismiss();
+                } else if self.find.open {
+                    self.find.close();
+                    self.focus_editor = true;
+                } else if self.command_palette_state.is_open {
                     self.command_palette_state.close();
                 } else if self.quick_capture_state.is_open {
                     self.quick_capture_state.close();
-                } else if self.note_details_open {
-                    self.note_details_open = false;
-                } else if self.explorer_drawer_open {
-                    self.explorer_drawer_open = false;
+                } else if self.overlay.is_some() {
+                    self.overlay = None;
                 } else if self.template_selector_open {
                     self.template_selector_open = false;
-                } else if self.pending_folder_delete.is_some() {
-                    self.pending_folder_delete = None;
-                } else if self.graph_overlay_open {
-                    self.graph_overlay_open = false;
+                } else if self.folders.pending_delete.is_some() {
+                    self.folders.pending_delete = None;
                 } else if self.pending_delete_id.is_some() {
                     self.pending_delete_id = None;
                 } else if self.view != AppView::Editor {
@@ -385,25 +412,22 @@ impl WidgetApp {
                 self.focus_editor = false;
             }
         }
-        if self.command_palette_state.is_open || self.quick_capture_state.is_open {
+        if self.command_palette_state.is_open
+            || self.quick_capture_state.is_open
+            || self.quick_switcher.is_open
+        {
             ui.disable();
         }
-        let full_graph = self.view == AppView::Graph && self.graph_fullscreen;
-        let effective_left_open = !full_graph
-            && self.settings.left_sidebar_open
-            && window_width >= ui_style::NAV_BREAKPOINT
-            && !self.settings.zen_mode;
-        let effective_right_open = !full_graph
-            && self.settings.right_sidebar_open
-            && window_width >= ui_style::WIDE_BREAKPOINT
-            && !self.settings.zen_mode
-            && self.view == AppView::Editor;
-        let effective_status_bar = self.settings.show_status_bar && !self.settings.zen_mode;
+        self.layout = self.compute_layout(window_width);
+        self.reconcile_overlays(window_width);
+        let effective_left_open = self.layout.left_panel;
+        let effective_right_open = self.layout.right_panel;
+        let effective_status_bar = self.layout.status_bar;
 
         egui::Panel::top("lilo_titlebar")
             .exact_size(ui_style::TOP_BAR_HEIGHT)
             .show(ui, |ui| {
-                if window_width < ui_style::COMPACT_WIDTH {
+                if self.layout.compact_header {
                     self.show_compact_header(ui);
                 } else {
                     self.show_workspace_header(ui);
@@ -560,60 +584,7 @@ impl WidgetApp {
                 AppView::Settings => self.show_settings(ui, &ctx),
             });
 
-        if self.explorer_drawer_open && window_width < ui_style::NAV_BREAKPOINT {
-            let mut open = true;
-            egui::Window::new("Your notes")
-                .open(&mut open)
-                .collapsible(false)
-                .default_width((window_width - 48.0).max(180.0))
-                .max_height(ui_style::screen_rect(&ctx).height() - 80.0)
-                .show(&ctx, |ui| {
-                    egui::ScrollArea::vertical().show(ui, |ui| self.show_left_explorer(ui));
-                });
-            self.explorer_drawer_open = open;
-        }
-        if self.note_details_open {
-            let mut open = true;
-            egui::Window::new("Note details")
-                .id(egui::Id::new("note_details"))
-                .open(&mut open)
-                .collapsible(false)
-                .resizable(true)
-                .default_size(egui::vec2(300.0, 260.0))
-                .show(&ctx, |ui| {
-                    if let Some(note) = self.data.selected_note().cloned() {
-                        self.show_right_inspector(ui, &note);
-                    }
-                });
-            self.note_details_open = open;
-        }
-
-        if self.graph_overlay_open {
-            let mut open = true;
-            let mut graph_output = None;
-            egui::Window::new("Knowledge graph")
-                .id(egui::Id::new("graph_overlay"))
-                .open(&mut open)
-                .collapsible(false)
-                .resizable(true)
-                .default_size(egui::vec2(320.0, 360.0))
-                .show(&ctx, |ui| {
-                    let output = graph::show(
-                        ui,
-                        &mut self.graph_state,
-                        &self.data.notes,
-                        &self.link_index,
-                        self.data.selected_note_id,
-                        &self.storage_paths.notes_dir,
-                        &self.settings.selected_folder,
-                    );
-                    graph_output = Some(output);
-                });
-            self.graph_overlay_open = open;
-            if graph_output.is_some_and(|output| self.handle_graph_output(output)) {
-                self.graph_overlay_open = false;
-            }
-        }
+        self.show_overlay(&ctx, window_width);
 
         // Global note deletion confirmation dialog
         if let Some(id) = self.pending_delete_id {
@@ -653,7 +624,7 @@ impl WidgetApp {
         }
 
         // Folder deletion confirmation dialog
-        if let Some(folder) = self.pending_folder_delete.clone() {
+        if let Some(folder) = self.folders.pending_delete.clone() {
             let center_pos = ui_style::screen_rect(&ctx).center();
             egui::Window::new("Delete folder")
                 .id(egui::Id::new("confirm_delete_folder"))
@@ -665,17 +636,17 @@ impl WidgetApp {
                     ui.label(format!(
                         "Folder '{}' contains {} note(s).",
                         folder.display(),
-                        self.pending_folder_notes_count
+                        self.folders.pending_delete_notes_count
                     ));
                     ui.label("Move this folder and all its notes to Trash?");
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         if ui.button("Move to Trash").clicked() {
                             self.delete_folder(&folder);
-                            self.pending_folder_delete = None;
+                            self.folders.pending_delete = None;
                         }
                         if ui.button("Cancel").clicked() {
-                            self.pending_folder_delete = None;
+                            self.folders.pending_delete = None;
                         }
                     });
                 });
@@ -741,7 +712,8 @@ impl WidgetApp {
                 .id(egui::Id::new("link_rewrite_preview_modal"))
                 .collapsible(false)
                 .resizable(true)
-                .default_width(420.0)
+                .default_width(420.0_f32.min(ui_style::screen_rect(&ctx).width() - 24.0))
+                .constrain_to(ui_style::screen_rect(&ctx).shrink(8.0))
                 .pivot(egui::Align2::CENTER_CENTER)
                 .default_pos(center_pos)
                 .show(&ctx, |ui| {
@@ -786,11 +758,11 @@ impl WidgetApp {
         }
 
         // Tag Rename Dialog
-        if self.tag_rename_dialog_open {
+        if self.tags_ui.rename_dialog_open {
             let affected_note_ids = tags::preview_tag_rename(
                 &self.data.notes,
-                &self.tag_to_rename,
-                &self.tag_new_name_buffer,
+                &self.tags_ui.to_rename,
+                &self.tags_ui.new_name_buffer,
             );
             let center_pos = ui_style::screen_rect(&ctx).center();
             egui::Window::new("Rename Tag across Vault")
@@ -800,14 +772,14 @@ impl WidgetApp {
                 .pivot(egui::Align2::CENTER_CENTER)
                 .default_pos(center_pos)
                 .show(&ctx, |ui| {
-                    ui.label(format!("Old tag: #{}", self.tag_to_rename));
+                    ui.label(format!("Old tag: #{}", self.tags_ui.to_rename));
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         ui.label("New tag:");
-                        ui.text_edit_singleline(&mut self.tag_new_name_buffer);
+                        ui.text_edit_singleline(&mut self.tags_ui.new_name_buffer);
                     });
                     ui.add_space(6.0);
-                    if self.tag_new_name_buffer.trim().is_empty() {
+                    if self.tags_ui.new_name_buffer.trim().is_empty() {
                         ui.small("Enter the replacement tag to calculate the preview.");
                     } else if affected_note_ids.is_empty() {
                         ui.small("No notes would be changed.");
@@ -836,8 +808,8 @@ impl WidgetApp {
                         {
                             let modified_note_ids = tags::rename_tag_in_vault(
                                 &mut self.data.notes,
-                                &self.tag_to_rename,
-                                &self.tag_new_name_buffer,
+                                &self.tags_ui.to_rename,
+                                &self.tags_ui.new_name_buffer,
                             );
                             let count = modified_note_ids.len();
                             self.dirty_note_ids.extend(modified_note_ids);
@@ -846,10 +818,10 @@ impl WidgetApp {
                                 LinkIndex::build(&self.data.notes, &self.storage_paths.notes_dir);
                             self.storage_message = Some(format!("Renamed tag in {count} note(s)"));
                             self.flush_dirty_notes();
-                            self.tag_rename_dialog_open = false;
+                            self.tags_ui.rename_dialog_open = false;
                         }
                         if ui.button("Cancel").clicked() {
-                            self.tag_rename_dialog_open = false;
+                            self.tags_ui.rename_dialog_open = false;
                         }
                     });
                 });
@@ -875,6 +847,19 @@ impl WidgetApp {
             }
         }
 
+        // Modal quick switcher (Ctrl+O)
+        if let Some(id) = quick_switcher::show_quick_switcher(
+            &ctx,
+            &mut self.quick_switcher,
+            &self.data.notes,
+            &self.storage_paths.notes_dir,
+            &self.settings.recent_note_ids,
+        ) {
+            analytics_events.push(AnalyticsFeature::QuickSwitcherUsed);
+            self.open_note(id);
+            self.activate_view(AppView::Editor);
+        }
+
         // Modal Quick Capture
         if let Some(submission) = quick_capture::show_quick_capture(
             &ctx,
@@ -892,7 +877,7 @@ impl WidgetApp {
         }
 
         self.show_analytics_consent(&ctx);
-        if self.analytics_details_open {
+        if self.analytics.details_open {
             let mut open = true;
             let screen_rect = ui_style::screen_rect(&ctx);
             let details_size = egui::vec2(
@@ -911,7 +896,7 @@ impl WidgetApp {
                         .id_salt("analytics_data_details_scroll")
                         .show(ui, Self::show_analytics_data_description);
                 });
-            self.analytics_details_open = open;
+            self.analytics.details_open = open;
         }
 
         if self.close_pending {

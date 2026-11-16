@@ -12,8 +12,11 @@ use uuid::Uuid;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_DAILY_COUNT: u16 = 1_000;
+/// Finished days that could not be delivered yet are kept for at most a week,
+/// matching the window the collection service accepts.
+const MAX_UNSENT_DAYS: usize = 7;
 
-pub const FEATURE_NAMES: [&str; 21] = [
+pub const FEATURE_NAMES: [&str; 25] = [
     "note_created",
     "daily_note_opened",
     "quick_capture_saved",
@@ -35,6 +38,10 @@ pub const FEATURE_NAMES: [&str; 21] = [
     "vault_exported",
     "zen_mode_enabled",
     "always_on_top_enabled",
+    "quick_switcher_used",
+    "find_in_note_used",
+    "text_replaced",
+    "completion_accepted",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,6 +67,10 @@ pub enum AnalyticsFeature {
     VaultExported,
     ZenModeEnabled,
     AlwaysOnTopEnabled,
+    QuickSwitcherUsed,
+    FindInNoteUsed,
+    TextReplaced,
+    CompletionAccepted,
 }
 
 impl AnalyticsFeature {
@@ -86,8 +97,20 @@ impl AnalyticsFeature {
             Self::VaultExported => "vault_exported",
             Self::ZenModeEnabled => "zen_mode_enabled",
             Self::AlwaysOnTopEnabled => "always_on_top_enabled",
+            Self::QuickSwitcherUsed => "quick_switcher_used",
+            Self::FindInNoteUsed => "find_in_note_used",
+            Self::TextReplaced => "text_replaced",
+            Self::CompletionAccepted => "completion_accepted",
         }
     }
+}
+
+/// Counters of a finished day that have not been confirmed by the server yet.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnsentReport {
+    pub date: String,
+    pub app_version: String,
+    pub features: BTreeMap<String, u16>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -99,6 +122,8 @@ pub struct AnalyticsSettings {
     pub counter_date: String,
     pub feature_counts: BTreeMap<String, u16>,
     pub pending_deletion_id: Option<Uuid>,
+    /// Previous days whose counters still have to be delivered, oldest first.
+    pub unsent_reports: Vec<UnsentReport>,
 }
 
 impl Default for AnalyticsSettings {
@@ -109,6 +134,7 @@ impl Default for AnalyticsSettings {
             counter_date: local_date(),
             feature_counts: BTreeMap::new(),
             pending_deletion_id: None,
+            unsent_reports: Vec::new(),
         }
     }
 }
@@ -127,8 +153,7 @@ impl AnalyticsSettings {
     pub fn decline(&mut self) {
         self.consent = Some(false);
         self.installation_id = None;
-        self.feature_counts.clear();
-        self.counter_date = local_date();
+        self.forget_counters();
     }
 
     pub fn disable_and_queue_deletion(&mut self) {
@@ -136,8 +161,7 @@ impl AnalyticsSettings {
         if let Some(installation_id) = self.installation_id.take() {
             self.pending_deletion_id = Some(installation_id);
         }
-        self.feature_counts.clear();
-        self.counter_date = local_date();
+        self.forget_counters();
     }
 
     pub fn finish_deletion(&mut self, installation_id: Uuid) {
@@ -159,24 +183,61 @@ impl AnalyticsSettings {
         true
     }
 
-    pub fn daily_payload(&mut self) -> Option<DailyPayload> {
+    /// The next report to deliver: unfinished previous days first, then today.
+    pub fn next_payload(&mut self) -> Option<DailyPayload> {
         if !self.enabled() {
             return None;
         }
         self.prepare_current_date();
-        Some(DailyPayload {
-            installation_id: self.installation_id?,
-            date: self.counter_date.clone(),
-            app_version: env!("CARGO_PKG_VERSION"),
-            features: self.feature_counts.clone(),
+        let installation_id = self.installation_id?;
+        Some(match self.unsent_reports.first() {
+            Some(report) => DailyPayload {
+                installation_id,
+                date: report.date.clone(),
+                app_version: report.app_version.clone(),
+                features: report.features.clone(),
+            },
+            None => DailyPayload {
+                installation_id,
+                date: self.counter_date.clone(),
+                app_version: env!("CARGO_PKG_VERSION").to_owned(),
+                features: self.feature_counts.clone(),
+            },
         })
     }
 
+    /// Marks a delivered day as done. Returns `true` when older days are still waiting.
+    pub fn confirm_delivered(&mut self, date: &str) -> bool {
+        self.unsent_reports.retain(|report| report.date != date);
+        !self.unsent_reports.is_empty()
+    }
+
+    fn forget_counters(&mut self) {
+        self.feature_counts.clear();
+        self.unsent_reports.clear();
+        self.counter_date = local_date();
+    }
+
+    /// Starts a new counting day. The finished day is kept until the server confirms it,
+    /// so short sessions that end before the next delivery are no longer lost.
     fn prepare_current_date(&mut self) {
         let today = local_date();
-        if self.counter_date != today {
-            self.counter_date = today;
-            self.feature_counts.clear();
+        if self.counter_date == today {
+            return;
+        }
+        let finished = std::mem::take(&mut self.feature_counts);
+        let finished_date = std::mem::replace(&mut self.counter_date, today);
+        if self.enabled() && !finished.is_empty() {
+            self.unsent_reports
+                .retain(|report| report.date != finished_date);
+            self.unsent_reports.push(UnsentReport {
+                date: finished_date,
+                app_version: env!("CARGO_PKG_VERSION").to_owned(),
+                features: finished,
+            });
+            self.unsent_reports.sort_by(|a, b| a.date.cmp(&b.date));
+            let overflow = self.unsent_reports.len().saturating_sub(MAX_UNSENT_DAYS);
+            self.unsent_reports.drain(..overflow);
         }
     }
 }
@@ -189,20 +250,24 @@ fn local_date() -> String {
 pub struct DailyPayload {
     installation_id: Uuid,
     date: String,
-    app_version: &'static str,
+    app_version: String,
     features: BTreeMap<String, u16>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AnalyticsOperation {
-    DailyReport,
-    DeleteInstallation,
+#[cfg(test)]
+impl DailyPayload {
+    pub fn date(&self) -> &str {
+        &self.date
+    }
 }
 
 #[derive(Clone, Debug)]
 pub enum AnalyticsResult {
-    Delivered(AnalyticsOperation, Option<Uuid>),
-    Failed(AnalyticsOperation),
+    /// The daily report for this local date was stored by the server.
+    ReportDelivered(String),
+    ReportFailed,
+    DeletionDelivered(Uuid),
+    DeletionFailed,
 }
 
 enum AnalyticsRequest {
@@ -234,15 +299,21 @@ impl AnalyticsClient {
                 let result = match request {
                     AnalyticsRequest::Daily(payload) => {
                         let delivered = endpoint.as_ref().is_some_and(|base| {
-                            agent
-                                .post(format!("{base}/v1/daily"))
-                                .send_json(&payload)
-                                .is_ok()
+                            match agent.post(format!("{base}/v1/daily")).send_json(&payload) {
+                                Ok(_) => true,
+                                Err(error) => {
+                                    eprintln!(
+                                        "Analytics report for {} failed: {error}",
+                                        payload.date
+                                    );
+                                    false
+                                }
+                            }
                         });
                         if delivered {
-                            AnalyticsResult::Delivered(AnalyticsOperation::DailyReport, None)
+                            AnalyticsResult::ReportDelivered(payload.date)
                         } else {
-                            AnalyticsResult::Failed(AnalyticsOperation::DailyReport)
+                            AnalyticsResult::ReportFailed
                         }
                     }
                     AnalyticsRequest::Delete(installation_id) => {
@@ -259,12 +330,9 @@ impl AnalyticsClient {
                                 .is_ok()
                         });
                         if delivered {
-                            AnalyticsResult::Delivered(
-                                AnalyticsOperation::DeleteInstallation,
-                                Some(installation_id),
-                            )
+                            AnalyticsResult::DeletionDelivered(installation_id)
                         } else {
-                            AnalyticsResult::Failed(AnalyticsOperation::DeleteInstallation)
+                            AnalyticsResult::DeletionFailed
                         }
                     }
                 };
@@ -348,5 +416,41 @@ mod tests {
         assert_eq!(settings.pending_deletion_id, Some(installation_id));
         assert!(settings.installation_id.is_none());
         assert!(settings.feature_counts.is_empty());
+    }
+
+    #[test]
+    fn finished_days_are_kept_until_the_server_confirms_them() {
+        let mut settings = AnalyticsSettings::default();
+        settings.enable();
+        settings.counter_date = "2026-01-01".to_owned();
+        settings.feature_counts.insert("note_created".to_owned(), 3);
+
+        settings.record(AnalyticsFeature::SearchUsed);
+        assert_eq!(settings.unsent_reports.len(), 1);
+        assert_eq!(settings.unsent_reports[0].features["note_created"], 3);
+        assert_eq!(settings.feature_counts["search_used"], 1);
+
+        let first = settings.next_payload().expect("payload");
+        assert_eq!(first.date(), "2026-01-01");
+        assert!(!settings.confirm_delivered("2026-01-01"));
+        let today = settings.next_payload().expect("payload");
+        assert_eq!(today.date(), local_date());
+    }
+
+    #[test]
+    fn unsent_days_are_bounded_and_cleared_on_opt_out() {
+        let mut settings = AnalyticsSettings::default();
+        settings.enable();
+        for day in 1..=10 {
+            settings.counter_date = format!("2026-01-{day:02}");
+            settings.feature_counts.insert("graph_opened".to_owned(), 1);
+            settings.record(AnalyticsFeature::GraphOpened);
+            settings.feature_counts.clear();
+        }
+        assert_eq!(settings.unsent_reports.len(), MAX_UNSENT_DAYS);
+        assert_eq!(settings.unsent_reports[0].date, "2026-01-04");
+
+        settings.disable_and_queue_deletion();
+        assert!(settings.unsent_reports.is_empty());
     }
 }

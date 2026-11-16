@@ -26,7 +26,11 @@ The public deployment currently used by official Lilo builds is
 Never commit either token. The public desktop endpoint and D1 identifiers in
 `wrangler.jsonc` are configuration, not credentials.
 
-The application endpoint accepts only the public feature whitelist. The GitHub
+The application endpoint stores only the public feature whitelist. Unknown
+feature names from newer clients are ignored rather than rejecting the whole
+report, and daily reports up to seven days old are accepted so clients can
+deliver days that ended while they were closed or offline. Deploy Worker
+changes before releasing a Lilo version that adds whitelisted features. The GitHub
 traffic endpoint additionally requires the Worker secret. There is no public
 endpoint for reading D1 data. Data handling and user controls are documented in
 the repository's [`PRIVACY.md`](../PRIVACY.md).

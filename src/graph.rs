@@ -130,7 +130,7 @@ pub fn show(
             }
         }
 
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let mut tools = |ui: &mut Ui| {
             if ui
                 .small_button("Full view")
                 .on_hover_text("Toggle graph workspace without side panels")
@@ -162,7 +162,14 @@ pub fn show(
                 state.zoom = (state.zoom / 1.2).max(0.35);
             }
             ui.small(format!("{}%", (state.zoom * 100.0).round()));
-        });
+        };
+        // Right-aligned tools cannot wrap; in narrow windows they flow onto the next row.
+        if ui.available_width() >= 300.0 {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), tools);
+        } else {
+            ui.end_row();
+            tools(ui);
+        }
     });
     if scope_changed {
         state.pan = Vec2::ZERO;

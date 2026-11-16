@@ -44,7 +44,8 @@ Lilo is a fast desktop note-taking widget built with Rust and egui. It opens as 
 
 - one live Markdown editor with headings, lists, tasks, code, links and inline local images;
 - Daily Notes, templates and Quick Capture with a global Windows shortcut;
-- Obsidian-style `[[wiki links]]`, aliases, backlinks and unresolved-link inspection;
+- Obsidian-style `[[wiki links]]`, aliases, backlinks and unresolved-link inspection, with link and `#tag` autocompletion;
+- in-note find and replace, a Ctrl+O quick switcher and live word, character and reading-time statistics;
 - hierarchical tags, structured search and reusable saved searches;
 - local, folder and vault knowledge graphs;
 - any directory as a vault, with quick switching between saved vaults;
@@ -96,6 +97,8 @@ GitHub Releases provide x86-64 archives for Ubuntu 22.04+ and current Arch Linux
 | Action | Default |
 | --- | --- |
 | Search and commands | `Ctrl+K` or `Ctrl+P` |
+| Open note (quick switcher) | `Ctrl+O` |
+| Find / replace in note | `Ctrl+F` / `Ctrl+H` |
 | Quick Capture | `Ctrl+Shift+C` |
 | Today's note | `Alt+D` |
 | New note | `Ctrl+N` |

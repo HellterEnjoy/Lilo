@@ -1,5 +1,5 @@
 use super::*;
-impl WidgetApp {
+impl LiloApp {
     pub(super) fn show_editor_workspace(
         &mut self,
         ui: &mut egui::Ui,
@@ -156,7 +156,7 @@ impl WidgetApp {
                                                             });
                                                         }
                                                         ui.add_space(12.0);
-                                                        let editor_id = egui::Id::new(("markdown_editor", note.id));
+                                                        let editor_id = status::editor_id(note.id);
 
                                                         let jump_to_cursor = self.pending_cursor_char_index.is_some_and(|(id, _)| id == note.id);
                                                         if let Some((target_note_id, char_idx)) = self.pending_cursor_char_index
@@ -165,6 +165,8 @@ impl WidgetApp {
                                                             markdown::set_cursor_char_index(ui.ctx(), editor_id, char_idx);
                                                             self.pending_cursor_char_index = None;
                                                         }
+
+                                                        completion::handle_completion_keys(ui.ctx(), &mut self.completion, note.id);
 
                                                         let mut markdown_command = None;
                                                         let editor_focused = ui.memory(|memory| memory.has_focus(editor_id));
@@ -263,6 +265,19 @@ impl WidgetApp {
                                                         });
                                                         ui.add_space(4.0);
 
+                                                        let find_frame = find::show_find_bar(ui, &mut self.find, &mut note.content);
+                                                        if find_frame.text_changed {
+                                                            command_changed = true;
+                                                            analytics_events.push(AnalyticsFeature::TextReplaced);
+                                                            self.storage_message = Some(format!(
+                                                                "Replaced {} match(es)",
+                                                                find_frame.replacements
+                                                            ));
+                                                        }
+                                                        if self.find.open {
+                                                            ui.add_space(4.0);
+                                                        }
+
                                                         if markdown_command.is_some_and(|command| {
                                                             markdown::apply_command(
                                                                 ui.ctx(),
@@ -320,6 +335,9 @@ impl WidgetApp {
                                                              self.settings.editor_font_size,
                                                              &inline_images,
                                                          );
+
+                                                        find::paint_matches(ui, &editor_output, &find_frame, &mut self.find.scroll_to_current);
+                                                        completion::update_completion_context(ui, &mut self.completion, note, editor_id, &editor_output);
 
                                                         if !dropped_files.is_empty() {
                                                             if let Some(position) = ui.ctx().input(|input| input.pointer.latest_pos())
@@ -503,6 +521,8 @@ impl WidgetApp {
                                                         }
                                                         self.mark_note_dirty(id);
                                                     }
+
+                                                    self.finish_completion_frame(ui.ctx());
 
                                                     if note_title_edit_finished
                                                         && let Some(note) = self.data.selected_note()

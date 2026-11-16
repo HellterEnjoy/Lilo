@@ -1,6 +1,6 @@
 use super::*;
 
-impl WidgetApp {
+impl LiloApp {
     pub(super) fn switch_vault_from_buffer(&mut self) {
         self.flush_dirty_notes();
         if !self.dirty_note_ids.is_empty() {
@@ -38,7 +38,7 @@ impl WidgetApp {
                 self.settings = loaded.settings;
                 self.storage_paths = loaded.paths;
                 self.folder_paths = loaded.folder_paths;
-                self.diagnostics = loaded.warnings;
+                self.recovery.diagnostics = loaded.warnings;
                 self.link_index = LinkIndex::build(&self.data.notes, &self.storage_paths.notes_dir);
                 self.tag_index = TagIndex::build(&self.data.notes);
                 self.graph_state = graph::GraphState::restore(&self.settings.graph_node_offsets);
@@ -53,22 +53,22 @@ impl WidgetApp {
                 self.last_index_change = None;
                 self.pending_link_rewrite = None;
                 self.pending_delete_id = None;
-                self.pending_folder_delete = None;
+                self.folders.pending_delete = None;
                 self.preview_cache = Default::default();
                 self.navigation_cache = None;
                 self.template_cache = None;
                 self.search_query.clear();
-                self.graph_overlay_open = false;
-                self.attachments_inspected = false;
-                self.attachments_orphans.clear();
+                self.overlay = None;
+                self.recovery.attachments_inspected = false;
+                self.recovery.attachment_orphans.clear();
                 self.note_titles_snapshot = self
                     .data
                     .notes
                     .iter()
                     .map(|note| (note.id, note.title.clone()))
                     .collect();
-                self.history_back.clear();
-                self.history_forward.clear();
+                self.history.back.clear();
+                self.history.forward.clear();
                 self.external_conflict = false;
                 self.external_changed_paths.clear();
                 self.last_external_sync = Instant::now();
@@ -140,7 +140,7 @@ impl WidgetApp {
     }
 
     pub(super) fn import_markdown_from_buffer(&mut self) {
-        let source = PathBuf::from(self.import_path_buffer.trim());
+        let source = PathBuf::from(self.recovery.import_path_buffer.trim());
         match storage::import_markdown(&source, &self.storage_paths, &self.settings.selected_folder)
         {
             Ok(note) => {
@@ -150,7 +150,7 @@ impl WidgetApp {
                 self.link_index = LinkIndex::build(&self.data.notes, &self.storage_paths.notes_dir);
                 self.vault_snapshot =
                     storage::vault_snapshot(&self.storage_paths.notes_dir).unwrap_or_default();
-                self.import_path_buffer.clear();
+                self.recovery.import_path_buffer.clear();
                 self.storage_message = Some("Markdown note imported".to_owned());
                 self.view = AppView::Editor;
                 self.record_analytics(AnalyticsFeature::MarkdownImported);
@@ -162,7 +162,7 @@ impl WidgetApp {
 
     pub(super) fn export_vault_from_buffer(&mut self) {
         self.flush_dirty_notes();
-        let destination = PathBuf::from(self.export_path_buffer.trim());
+        let destination = PathBuf::from(self.recovery.export_path_buffer.trim());
         match storage::export_vault(&self.storage_paths, &destination) {
             Ok(path) => {
                 self.storage_message = Some(format!("Vault exported to {}", path.display()));

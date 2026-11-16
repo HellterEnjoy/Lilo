@@ -38,6 +38,11 @@ aggregate counters periodically while the application remains open. Repeated
 snapshots replace the daily counters with the largest received value rather
 than creating a detailed event timeline.
 
+If a day ends before its counters were delivered (for example because Lilo was
+closed or offline), that day's counters stay in local settings and are sent on
+a later launch. At most seven such days are kept; older ones are discarded
+locally. Disabling analytics removes them together with the current counters.
+
 ## Purpose and legal basis
 
 The data is used only to estimate active installations, understand which broad

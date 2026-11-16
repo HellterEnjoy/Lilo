@@ -190,7 +190,7 @@ fn show_folder_node(
     });
 }
 
-impl WidgetApp {
+impl LiloApp {
     fn apply_notes_list_actions(&mut self, actions: NotesListActions) {
         if let Some(id) = actions.selected_note_id {
             self.open_note(id);
@@ -221,12 +221,12 @@ impl WidgetApp {
             self.toggle_pin(id);
         }
         if let Some(path) = actions.rename_folder {
-            self.folder_name_buffer = path
+            self.folders.name_buffer = path
                 .file_name()
                 .unwrap_or_default()
                 .to_string_lossy()
                 .into_owned();
-            self.editing_folder = Some(path);
+            self.folders.editing = Some(path);
         }
         if let Some(path) = actions.delete_folder {
             let count = self
@@ -243,8 +243,8 @@ impl WidgetApp {
             if count == 0 {
                 self.delete_folder(&path);
             } else {
-                self.pending_folder_delete = Some(path);
-                self.pending_folder_notes_count = count;
+                self.folders.pending_delete = Some(path);
+                self.folders.pending_delete_notes_count = count;
             }
         }
     }
@@ -259,8 +259,8 @@ impl WidgetApp {
             ui_style::screen_title(ui, &storage::vault_name(&self.settings.vault_path));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui_style::compact_action(ui, Icon::Folder, "New folder").clicked() {
-                    self.show_new_folder_input = !self.show_new_folder_input;
-                    self.new_folder_name.clear();
+                    self.folders.show_new_input = !self.folders.show_new_input;
+                    self.folders.new_name.clear();
                 }
                 if ui_style::compact_action(ui, Icon::Add, "New note").clicked() {
                     create_note_clicked = true;
@@ -286,11 +286,11 @@ impl WidgetApp {
             move_current_note = true;
         }
 
-        if self.show_new_folder_input {
+        if self.folders.show_new_input {
             ui.horizontal(|ui| {
                 let input_width = (ui.available_width() - 58.0).max(40.0);
                 let response = ui.add(
-                    egui::TextEdit::singleline(&mut self.new_folder_name)
+                    egui::TextEdit::singleline(&mut self.folders.new_name)
                         .desired_width(input_width)
                         .hint_text("Folder name..."),
                 );
@@ -413,16 +413,16 @@ impl WidgetApp {
 
         self.apply_notes_list_actions(actions);
 
-        if self.editing_folder.is_some() {
+        if self.folders.editing.is_some() {
             ui.separator();
             ui.horizontal(|ui| {
                 ui.label("New folder name:");
-                ui.text_edit_singleline(&mut self.folder_name_buffer);
+                ui.text_edit_singleline(&mut self.folders.name_buffer);
                 if ui.button("Rename").clicked() {
                     self.rename_selected_folder();
                 }
                 if ui.button("Cancel").clicked() {
-                    self.editing_folder = None;
+                    self.folders.editing = None;
                 }
             });
         }
@@ -519,8 +519,8 @@ impl WidgetApp {
             self.show_vault_switcher(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui_style::compact_action(ui, Icon::Folder, "New folder").clicked() {
-                    self.show_new_folder_input = !self.show_new_folder_input;
-                    self.new_folder_name.clear();
+                    self.folders.show_new_input = !self.folders.show_new_input;
+                    self.folders.new_name.clear();
                 }
                 if ui_style::compact_action(ui, Icon::Add, "New note").clicked() {
                     create_note_clicked = true;
@@ -663,9 +663,9 @@ impl WidgetApp {
                 self.record_analytics(AnalyticsFeature::TagFilterUsed);
             }
             if let Some(tag) = rename_tag_target {
-                self.tag_to_rename = tag.clone();
-                self.tag_new_name_buffer = tag;
-                self.tag_rename_dialog_open = true;
+                self.tags_ui.to_rename = tag.clone();
+                self.tags_ui.new_name_buffer = tag;
+                self.tags_ui.rename_dialog_open = true;
             }
         }
 
@@ -708,29 +708,29 @@ impl WidgetApp {
 
                     if !self.search_query.trim().is_empty() {
                         ui.add_space(4.0);
-                        if !self.show_new_preset_input {
+                        if !self.tags_ui.show_new_preset_input {
                             if ui.button("+ Save active search...").clicked() {
-                                self.show_new_preset_input = true;
-                                self.new_preset_name_buffer =
+                                self.tags_ui.show_new_preset_input = true;
+                                self.tags_ui.new_preset_name_buffer =
                                     format!("Search: {}", self.search_query.trim());
                             }
                         } else {
                             ui.horizontal(|ui| {
-                                ui.text_edit_singleline(&mut self.new_preset_name_buffer);
+                                ui.text_edit_singleline(&mut self.tags_ui.new_preset_name_buffer);
                                 if ui.small_button("Save").clicked()
-                                    && !self.new_preset_name_buffer.trim().is_empty()
+                                    && !self.tags_ui.new_preset_name_buffer.trim().is_empty()
                                 {
                                     self.settings.search_presets.push(SearchPreset {
                                         id: Uuid::new_v4(),
-                                        name: self.new_preset_name_buffer.trim().to_owned(),
+                                        name: self.tags_ui.new_preset_name_buffer.trim().to_owned(),
                                         query: self.search_query.trim().to_owned(),
                                     });
                                     self.record_analytics(AnalyticsFeature::SavedSearchCreated);
                                     self.save_settings();
-                                    self.show_new_preset_input = false;
+                                    self.tags_ui.show_new_preset_input = false;
                                 }
                                 if ui.small_button("Cancel").clicked() {
-                                    self.show_new_preset_input = false;
+                                    self.tags_ui.show_new_preset_input = false;
                                 }
                             });
                         }
@@ -751,11 +751,11 @@ impl WidgetApp {
         ui.separator();
 
         // Folder and Note Tree with search input
-        if self.show_new_folder_input {
+        if self.folders.show_new_input {
             ui.horizontal(|ui| {
                 let input_width = (ui.available_width() - 58.0).max(40.0);
                 let response = ui.add(
-                    egui::TextEdit::singleline(&mut self.new_folder_name)
+                    egui::TextEdit::singleline(&mut self.folders.new_name)
                         .desired_width(input_width)
                         .hint_text("Folder name..."),
                 );

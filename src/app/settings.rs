@@ -1,5 +1,5 @@
 use super::*;
-impl WidgetApp {
+impl LiloApp {
     pub(super) fn cached_templates(&mut self) -> Vec<crate::templates::TemplateEntry> {
         if self
             .template_cache
@@ -300,31 +300,31 @@ impl WidgetApp {
                                     &self.settings.attachments_folder,
                                 ) {
                                     Ok(orphans) => {
-                                        self.attachments_orphans = orphans;
-                                        self.attachments_inspected = true;
+                                        self.recovery.attachment_orphans = orphans;
+                                        self.recovery.attachments_inspected = true;
                                     }
                                     Err(error) => {
-                                        self.attachments_orphans.clear();
-                                        self.attachments_inspected = false;
+                                        self.recovery.attachment_orphans.clear();
+                                        self.recovery.attachments_inspected = false;
                                         self.storage_message = Some(error);
                                     }
                                 }
                             }
                         });
 
-                        if self.attachments_inspected {
-                            if self.attachments_orphans.is_empty() {
+                        if self.recovery.attachments_inspected {
+                            if self.recovery.attachment_orphans.is_empty() {
                                 ui_style::muted(ui, "✓ No orphaned attachment files found.");
                             } else {
                                 ui.label(format!(
                                     "Found {} unreferenced attachment(s):",
-                                    self.attachments_orphans.len()
+                                    self.recovery.attachment_orphans.len()
                                 ));
                                 let mut delete_orphan_path = None;
                                 egui::ScrollArea::vertical()
                                     .max_height(140.0)
                                     .show(ui, |ui| {
-                                        for orphan in &self.attachments_orphans {
+                                        for orphan in &self.recovery.attachment_orphans {
                                             let file_name = orphan
                                                 .file_name()
                                                 .unwrap_or_default()
@@ -341,7 +341,7 @@ impl WidgetApp {
                                 if let Some(path_to_del) = delete_orphan_path {
                                     match std::fs::remove_file(&path_to_del) {
                                         Ok(()) => {
-                                            self.attachments_orphans.retain(|p| p != &path_to_del);
+                                            self.recovery.attachment_orphans.retain(|p| p != &path_to_del);
                                             self.storage_message =
                                                 Some("Deleted orphaned attachment".to_owned());
                                         }
@@ -355,12 +355,12 @@ impl WidgetApp {
 
                                 if ui.button("Clean Up All Orphans").clicked() {
                                     let mut count = 0;
-                                    for orphan in &self.attachments_orphans {
+                                    for orphan in &self.recovery.attachment_orphans {
                                         if std::fs::remove_file(orphan).is_ok() {
                                             count += 1;
                                         }
                                     }
-                                    self.attachments_orphans.retain(|path| path.exists());
+                                    self.recovery.attachment_orphans.retain(|path| path.exists());
                                     self.storage_message =
                                         Some(format!("Deleted {count} orphaned file(s)"));
                                 }
@@ -461,7 +461,7 @@ impl WidgetApp {
                         ui.label("Import one Markdown file into the selected folder");
                         ui.horizontal_wrapped(|ui| {
                             ui.add(
-                                egui::TextEdit::singleline(&mut self.import_path_buffer)
+                                egui::TextEdit::singleline(&mut self.recovery.import_path_buffer)
                                     .hint_text(operating_system.markdown_path_hint())
                                     .desired_width((ui.available_width() - 72.0).max(80.0)),
                             );
@@ -472,7 +472,7 @@ impl WidgetApp {
                         ui.label("Export the vault to a timestamped folder");
                         ui.horizontal_wrapped(|ui| {
                             ui.add(
-                                egui::TextEdit::singleline(&mut self.export_path_buffer)
+                                egui::TextEdit::singleline(&mut self.recovery.export_path_buffer)
                                     .hint_text(operating_system.export_path_hint())
                                     .desired_width((ui.available_width() - 72.0).max(80.0)),
                             );
@@ -549,7 +549,7 @@ impl WidgetApp {
 
                     ui.horizontal_wrapped(|ui| {
                         if ui.button("View exactly what is sent").clicked() {
-                            self.analytics_details_open = true;
+                            self.analytics.details_open = true;
                         }
                         if self.settings.analytics.enabled()
                             && ui.button("Disable and delete my analytics data").clicked()
@@ -564,7 +564,7 @@ impl WidgetApp {
                             "Deletion is pending and will retry automatically when online.",
                         );
                     }
-                    if let Some(status) = &self.analytics_status {
+                    if let Some(status) = &self.analytics.status {
                         ui_style::muted(ui, status);
                     }
                 });

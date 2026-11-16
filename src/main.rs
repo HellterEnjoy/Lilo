@@ -3,8 +3,11 @@
 mod analytics;
 mod app;
 mod attachments;
+#[cfg(test)]
+mod benchmarks;
 mod commands;
 mod daily;
+mod editor_tools;
 mod folders;
 mod global_hotkey;
 mod graph;
@@ -13,6 +16,7 @@ mod markdown;
 mod note_preview;
 mod platform;
 mod quick_capture;
+mod quick_switcher;
 mod search;
 mod storage;
 mod tags;
@@ -50,7 +54,7 @@ fn main() -> eframe::Result {
         native_options,
         Box::new(|creation_context| {
             egui_extras::install_image_loaders(&creation_context.egui_ctx);
-            Ok(Box::new(app::WidgetApp::new()))
+            Ok(Box::new(app::LiloApp::new()))
         }),
     )
 }

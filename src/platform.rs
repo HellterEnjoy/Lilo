@@ -104,10 +104,7 @@ fn set_autostart_impl(enabled: bool) -> io::Result<()> {
     const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 
     if !enabled {
-        for value in ["Lilo", "RustWidgets"] {
-            remove_windows_run_value(RUN_KEY, value)?;
-        }
-        return Ok(());
+        return remove_windows_run_value(RUN_KEY, "Lilo");
     }
 
     let exe_path = std::env::current_exe()?;
@@ -119,11 +116,6 @@ fn set_autostart_impl(enabled: bool) -> io::Result<()> {
     if !status.success() {
         return Err(io::Error::other("Windows registry command failed"));
     }
-
-    // Remove the pre-Lilo registry value after the new value is installed.
-    let _ = Command::new("reg")
-        .args(["delete", RUN_KEY, "/v", "RustWidgets", "/f"])
-        .status();
     Ok(())
 }
 

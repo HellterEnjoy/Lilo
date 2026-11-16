@@ -1,17 +1,20 @@
 mod actions;
+mod completion;
 mod editor;
 mod explorer;
+mod find;
 mod inspector;
+mod layout;
 mod navigation;
 mod notes;
 mod persistence;
 mod recovery;
 mod settings;
 mod shell;
+mod state;
+mod status;
 mod vault;
-use crate::analytics::{
-    self, AnalyticsClient, AnalyticsFeature, AnalyticsOperation, AnalyticsResult,
-};
+use crate::analytics::{self, AnalyticsClient, AnalyticsFeature, AnalyticsResult};
 use crate::commands::{self, CommandAction, CommandPaletteResult, CommandPaletteState};
 use crate::daily::LocalDateService;
 use crate::folders;
@@ -21,6 +24,7 @@ use crate::links::{self, LinkIndex, LinkResolution};
 use crate::markdown;
 use crate::platform;
 use crate::quick_capture::{self, QuickCaptureState, QuickCaptureSubmission};
+use crate::quick_switcher::{self, QuickSwitcherState};
 use crate::search::SearchQuery;
 use crate::storage::{
     self, AppData, AppSettings, Note, NoteSort, QuickCaptureTarget, SearchPreset, StoragePaths,
@@ -40,9 +44,10 @@ const EXTERNAL_SYNC_INTERVAL: Duration = Duration::from_secs(2);
 const INDEX_REFRESH_DEBOUNCE: Duration = Duration::from_millis(350);
 const ANALYTICS_INITIAL_DELAY: Duration = Duration::from_secs(10);
 const ANALYTICS_UPDATE_INTERVAL: Duration = Duration::from_secs(15 * 60);
+const ANALYTICS_RETRY_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const AUTOSAVE_INTERVAL_OPTIONS: [u64; 6] = [15, 30, 60, 120, 300, 600];
 
-pub(crate) struct WidgetApp {
+pub(crate) struct LiloApp {
     data: AppData,
     settings: AppSettings,
     storage_paths: StoragePaths,
@@ -60,7 +65,10 @@ pub(crate) struct WidgetApp {
     preview_cache: crate::note_preview::PreviewCache,
     navigation_cache: Option<(u64, std::sync::Arc<navigation::NavigationIndex>)>,
     viewport_width: f32,
-    explorer_drawer_open: bool,
+    /// The single floating overlay currently open, if any.
+    overlay: Option<layout::Overlay>,
+    /// What the responsive layout shows this frame.
+    layout: layout::EffectiveLayout,
     applied_theme: Option<(bool, [u8; 3], u32, bool)>,
     close_pending: bool,
     discard_on_close: bool,
@@ -72,11 +80,6 @@ pub(crate) struct WidgetApp {
     search_query: String,
     focus_search: bool,
     focus_editor: bool,
-    show_new_folder_input: bool,
-    new_folder_name: String,
-    editing_folder: Option<PathBuf>,
-    folder_name_buffer: String,
-    graph_overlay_open: bool,
     vault_path_buffer: String,
     vault_snapshot: HashSet<(PathBuf, u128)>,
     snapshot_worker: crate::vault_watch::SnapshotWorker,
@@ -84,33 +87,9 @@ pub(crate) struct WidgetApp {
     last_external_sync: Instant,
     external_conflict: bool,
     window_settings_applied: bool,
-    recovery_tab: RecoveryTab,
-    selected_backup: Option<PathBuf>,
-    backup_preview: String,
-    diagnostics: Vec<String>,
-    import_path_buffer: String,
-    export_path_buffer: String,
     external_changed_paths: Vec<PathBuf>,
-    new_tag: String,
-    new_alias: String,
-    note_details_open: bool,
 
-    // Tags and saved search state.
-    tag_rename_dialog_open: bool,
-    tag_to_rename: String,
-    tag_new_name_buffer: String,
     pending_link_rewrite: Option<PendingLinkRewrite>,
-    show_new_preset_input: bool,
-    new_preset_name_buffer: String,
-
-    // Attachment inspection state.
-    attachments_orphans: Vec<PathBuf>,
-    attachments_inspected: bool,
-
-    // Note navigation state.
-    history_back: Vec<Uuid>,
-    history_forward: Vec<Uuid>,
-    is_navigating_history: bool,
     note_titles_snapshot: HashMap<Uuid, String>,
 
     // Daily workflow and global capture state.
@@ -121,19 +100,17 @@ pub(crate) struct WidgetApp {
     template_cache: Option<(PathBuf, PathBuf, Vec<crate::templates::TemplateEntry>)>,
     graph_fullscreen: bool,
     template_selector_for_new_note: bool,
-    pending_folder_delete: Option<PathBuf>,
-    pending_folder_notes_count: usize,
     pending_cursor_char_index: Option<(Uuid, usize)>,
 
-    // Analytics is opt-in and all network work runs outside the UI thread.
-    analytics_client: AnalyticsClient,
-    analytics_dirty: bool,
-    analytics_report_in_flight: bool,
-    analytics_deletion_in_flight: bool,
-    analytics_next_send: Instant,
-    analytics_next_delete_attempt: Instant,
-    analytics_status: Option<String>,
-    analytics_details_open: bool,
+    // Workflow-specific state groups (see `state.rs`).
+    recovery: state::RecoveryState,
+    history: state::NoteHistory,
+    folders: state::FolderUiState,
+    tags_ui: state::TagUiState,
+    analytics: state::AnalyticsRuntime,
+    find: state::FindState,
+    completion: state::CompletionState,
+    quick_switcher: QuickSwitcherState,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -216,7 +193,7 @@ fn autosave_interval_label(seconds: u64) -> String {
     }
 }
 
-impl WidgetApp {
+impl LiloApp {
     pub(crate) fn new() -> Self {
         Self::from_loaded(storage::load_storage().expect("Failed to initialize Markdown storage"))
     }
@@ -272,7 +249,8 @@ impl WidgetApp {
             preview_cache: Default::default(),
             navigation_cache: None,
             viewport_width: 400.0,
-            explorer_drawer_open: false,
+            overlay: None,
+            layout: Default::default(),
             applied_theme: None,
             close_pending: false,
             discard_on_close: false,
@@ -283,11 +261,6 @@ impl WidgetApp {
             search_query: String::new(),
             focus_search: false,
             focus_editor: false,
-            show_new_folder_input: false,
-            new_folder_name: String::new(),
-            editing_folder: None,
-            folder_name_buffer: String::new(),
-            graph_overlay_open: false,
             vault_path_buffer,
             vault_snapshot,
             snapshot_worker: Default::default(),
@@ -295,30 +268,10 @@ impl WidgetApp {
             last_external_sync: Instant::now(),
             external_conflict: false,
             window_settings_applied: false,
-            recovery_tab: RecoveryTab::Trash,
-            selected_backup: None,
-            backup_preview: String::new(),
-            diagnostics,
-            import_path_buffer: String::new(),
-            export_path_buffer: String::new(),
             external_changed_paths: Vec::new(),
-            new_tag: String::new(),
-            new_alias: String::new(),
-            note_details_open: false,
 
-            tag_rename_dialog_open: false,
-            tag_to_rename: String::new(),
-            tag_new_name_buffer: String::new(),
             pending_link_rewrite: None,
-            show_new_preset_input: false,
-            new_preset_name_buffer: String::new(),
 
-            attachments_orphans: Vec::new(),
-            attachments_inspected: false,
-
-            history_back: Vec::new(),
-            history_forward: Vec::new(),
-            is_navigating_history: false,
             note_titles_snapshot,
 
             hotkey_manager,
@@ -328,21 +281,26 @@ impl WidgetApp {
             template_cache: None,
             graph_fullscreen: false,
             template_selector_for_new_note: true,
-            pending_folder_delete: None,
-            pending_folder_notes_count: 0,
             pending_cursor_char_index: None,
-            analytics_client,
-            analytics_dirty,
-            analytics_report_in_flight: false,
-            analytics_deletion_in_flight: false,
-            analytics_next_send: now + ANALYTICS_INITIAL_DELAY,
-            analytics_next_delete_attempt: now,
-            analytics_status: None,
-            analytics_details_open: false,
+            recovery: state::RecoveryState {
+                diagnostics,
+                ..Default::default()
+            },
+            history: Default::default(),
+            folders: Default::default(),
+            tags_ui: Default::default(),
+            analytics: state::AnalyticsRuntime::new(
+                analytics_client,
+                analytics_dirty,
+                now + ANALYTICS_INITIAL_DELAY,
+            ),
+            find: Default::default(),
+            completion: Default::default(),
+            quick_switcher: Default::default(),
         }
     }
 }
-impl eframe::App for WidgetApp {
+impl eframe::App for LiloApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.show_ui(ui);
     }
@@ -441,7 +399,7 @@ mod redesign_tests {
         assert!(app.dirty_note_ids.contains(&id));
     }
 
-    fn fixture() -> (tempfile::TempDir, WidgetApp) {
+    fn fixture() -> (tempfile::TempDir, LiloApp) {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().to_path_buf();
         let mut note = Note::new_named(&root, "Проверка");
@@ -457,7 +415,7 @@ mod redesign_tests {
             ..Default::default()
         };
         settings.analytics.consent = Some(false);
-        let app = WidgetApp::from_loaded(storage::LoadedStorage {
+        let app = LiloApp::from_loaded(storage::LoadedStorage {
             data: AppData {
                 notes: vec![note],
                 selected_note_id,
@@ -476,7 +434,7 @@ mod redesign_tests {
         (temp, app)
     }
 
-    fn render(app: &mut WidgetApp, ctx: &egui::Context, width: f32) {
+    fn render(app: &mut LiloApp, ctx: &egui::Context, width: f32) {
         let mut output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
@@ -488,6 +446,136 @@ mod redesign_tests {
             |ui| app.show_ui(ui),
         );
         output.textures_delta.clear();
+    }
+
+    fn render_size(app: &mut LiloApp, ctx: &egui::Context, width: f32, height: f32) {
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width, height),
+                    )),
+                    ..Default::default()
+                },
+                |ui| app.show_ui(ui),
+            );
+            output.textures_delta.clear();
+        }
+    }
+
+    fn visible_windows(ctx: &egui::Context) -> Vec<egui::Rect> {
+        ctx.memory(|memory| {
+            memory
+                .areas()
+                .visible_layer_ids()
+                .into_iter()
+                .filter(|layer| layer.order == egui::Order::Middle)
+                .filter_map(|layer| memory.area_rect(layer.id))
+                .collect()
+        })
+    }
+
+    #[test]
+    fn overlays_never_stack_and_close_when_redundant() {
+        let (_temp, mut app) = fixture();
+        let ctx = egui::Context::default();
+        render_size(&mut app, &ctx, 360.0, 520.0);
+
+        app.handle_command_action(CommandAction::ToggleLeftSidebar);
+        assert!(app.overlay_is(layout::Overlay::Explorer));
+        app.handle_command_action(CommandAction::NoteDetails);
+        app.handle_command_action(CommandAction::ToggleGraphOverlay);
+        assert!(app.overlay_is(layout::Overlay::Graph));
+        render_size(&mut app, &ctx, 360.0, 520.0);
+        assert_eq!(visible_windows(&ctx).len(), 1);
+
+        // The explorer drawer is pointless once the docked sidebar fits.
+        app.open_overlay(layout::Overlay::Explorer);
+        render_size(&mut app, &ctx, 900.0, 700.0);
+        assert_eq!(app.overlay, None);
+
+        // Note details duplicates the inspector panel on wide windows and other views.
+        app.handle_command_action(CommandAction::ToggleRightInspector);
+        assert!(app.overlay_is(layout::Overlay::NoteDetails));
+        render_size(&mut app, &ctx, 1440.0, 900.0);
+        assert_eq!(app.overlay, None);
+        app.open_overlay(layout::Overlay::NoteDetails);
+        app.handle_command_action(CommandAction::ViewSettings);
+        render_size(&mut app, &ctx, 900.0, 700.0);
+        assert_eq!(app.overlay, None);
+    }
+
+    #[test]
+    fn panel_toggles_change_what_is_visible_in_zen_mode() {
+        let (_temp, mut app) = fixture();
+        let ctx = egui::Context::default();
+        app.settings.zen_mode = true;
+        render_size(&mut app, &ctx, 1440.0, 900.0);
+        assert!(!app.layout.left_panel);
+
+        app.handle_command_action(CommandAction::ToggleLeftSidebar);
+        render_size(&mut app, &ctx, 1440.0, 900.0);
+        assert!(!app.settings.zen_mode);
+        assert!(app.layout.left_panel);
+
+        app.handle_command_action(CommandAction::ToggleLeftSidebar);
+        render_size(&mut app, &ctx, 1440.0, 900.0);
+        assert!(!app.layout.left_panel);
+
+        app.settings.zen_mode = true;
+        app.handle_command_action(CommandAction::ToggleRightInspector);
+        render_size(&mut app, &ctx, 1440.0, 900.0);
+        assert!(app.layout.right_panel);
+    }
+
+    #[test]
+    fn every_size_and_mode_keeps_one_overlay_inside_the_window() {
+        let sizes = [
+            (320.0, 480.0),
+            (360.0, 520.0),
+            (599.0, 700.0),
+            (600.0, 700.0),
+            (900.0, 700.0),
+            (1099.0, 800.0),
+            (1100.0, 360.0),
+            (1440.0, 900.0),
+        ];
+        let overlays = [
+            None,
+            Some(layout::Overlay::Explorer),
+            Some(layout::Overlay::NoteDetails),
+            Some(layout::Overlay::Graph),
+        ];
+        // Overlays matter most over the editor; other views check that redundant
+        // overlays are dismissed. Zen mode only changes the editor layout.
+        let mut cases = Vec::new();
+        for overlay in overlays {
+            cases.push((AppView::Editor, false, overlay));
+            cases.push((AppView::Editor, true, overlay));
+            cases.push((AppView::Graph, false, overlay));
+        }
+        cases.push((AppView::Settings, false, Some(layout::Overlay::NoteDetails)));
+        cases.push((AppView::NotesList, false, Some(layout::Overlay::Explorer)));
+        for (width, height) in sizes {
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, height));
+            let (_temp, mut app) = fixture();
+            for &(view, zen, overlay) in &cases {
+                let ctx = egui::Context::default();
+                app.view = view;
+                app.settings.zen_mode = zen;
+                app.overlay = overlay;
+                render_size(&mut app, &ctx, width, height);
+                let windows = visible_windows(&ctx);
+                assert!(windows.len() <= 1, "{width}x{height}: {windows:?}");
+                for rect in windows {
+                    assert!(
+                        screen.expand(1.0).contains_rect(rect),
+                        "{width}x{height} {overlay:?}: {rect:?} leaves the window"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -599,7 +687,7 @@ mod redesign_tests {
         app.handle_command_action(CommandAction::QuickCapture);
         assert!(app.quick_capture_state.is_open);
         app.handle_command_action(CommandAction::ToggleGraphOverlay);
-        assert!(app.graph_overlay_open);
+        assert!(app.overlay_is(layout::Overlay::Graph));
         assert!(!eframe::App::persist_egui_memory(&app));
     }
 }

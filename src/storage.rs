@@ -19,6 +19,10 @@ use uuid::Uuid;
 
 pub use diagnostics::vault_diagnostics;
 use fs_io::{atomic_write, safe_managed_file};
+#[cfg(test)]
+pub(crate) use notes::load_notes;
+#[cfg(test)]
+use notes::sanitize_file_stem;
 pub use notes::{
     AppData, Note, create_note_folder, ensure_note_folder, move_note_to_folder, rename_folder,
     rename_note_file, save_note,
@@ -26,8 +30,6 @@ pub use notes::{
 use notes::{
     is_safe_relative_path, load_note, load_notes_excluding, managed_note_exclusions, note_file_name,
 };
-#[cfg(test)]
-use notes::{load_notes, sanitize_file_stem};
 pub use recovery::{
     backup_preview, delete_folder_with_trash, list_backups, list_trash, move_note_to_trash,
     restore_backup, restore_from_trash, save_note_with_backup, save_notes_with_report,

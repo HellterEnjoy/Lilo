@@ -301,7 +301,7 @@ pub fn rename_folder(notes_dir: &Path, relative: &Path, new_name: &str) -> Stora
 }
 
 #[cfg(test)]
-pub(super) fn load_notes(
+pub(crate) fn load_notes(
     notes_dir: &Path,
 ) -> StorageResult<(Vec<Note>, Vec<String>, Vec<PathBuf>)> {
     load_notes_excluding(notes_dir, &[])

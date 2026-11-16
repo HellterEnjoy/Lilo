@@ -20,7 +20,17 @@ const ALLOWED_FEATURES = new Set([
   "vault_exported",
   "zen_mode_enabled",
   "always_on_top_enabled",
+  "quick_switcher_used",
+  "find_in_note_used",
+  "text_replaced",
+  "completion_accepted",
 ]);
+
+// Clients keep finished days for up to a week when they are offline or closed
+// before the next delivery, so daily reports may arrive that late.
+const DAILY_REPORT_MAX_AGE_DAYS = 7;
+// Generous upper bound so a newer client with extra features is never rejected.
+const MAX_REPORTED_FEATURES = 64;
 
 const UUID_V4 =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -88,21 +98,25 @@ function validateFeatures(features) {
     return { valid: false, error: "features must be an object" };
   }
 
-  const entries = Object.entries(features);
-  if (entries.length > ALLOWED_FEATURES.size) {
+  const reported = Object.entries(features);
+  if (reported.length > MAX_REPORTED_FEATURES) {
     return { valid: false, error: "Too many features" };
   }
 
-  for (const [featureName, usageCount] of entries) {
+  // Unknown names come from newer clients; they are skipped instead of
+  // rejecting the whole report, so already-known counters are still stored.
+  const entries = [];
+  for (const [featureName, usageCount] of reported) {
     if (!ALLOWED_FEATURES.has(featureName)) {
-      return { valid: false, error: `Unknown feature: ${featureName}` };
+      continue;
     }
     if (!Number.isInteger(usageCount) || usageCount < 1 || usageCount > 1000) {
       return { valid: false, error: `Invalid count for: ${featureName}` };
     }
+    entries.push([featureName, usageCount]);
   }
 
-  return { valid: true, entries };
+  return { valid: true, entries, ignored: reported.length - entries.length };
 }
 
 function constantTimeEqual(left, right) {
@@ -142,7 +156,7 @@ async function acceptDailyReport(request, env) {
   if (!validateInstallationId(data.installation_id)) {
     return json({ error: "Invalid installation_id" }, 400);
   }
-  if (!validDate(data.date)) {
+  if (!validDate(data.date, DAILY_REPORT_MAX_AGE_DAYS)) {
     return json({ error: "Invalid date" }, 400);
   }
   if (!validVersion(data.app_version)) {
@@ -201,6 +215,7 @@ async function acceptDailyReport(request, env) {
   return json({
     accepted: true,
     accepted_features: featureValidation.entries.length,
+    ignored_features: featureValidation.ignored,
   });
 }
 

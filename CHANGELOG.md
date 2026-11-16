@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.3 — Writing Flow and Faster Navigation
+
+- added `[[wiki link]]` and `#tag` autocompletion in the editor: suggestions follow the caret, Enter or Tab inserts, Esc dismisses, and code blocks and headings never trigger it;
+- added in-note find and replace (Ctrl+F / Ctrl+H) with match highlighting, a match counter, case matching, Enter/Shift+Enter and F3 navigation, and Replace / Replace all;
+- added a Ctrl+O quick switcher that opens notes by fuzzy title, alias or folder match and lists recent and pinned notes when empty;
+- expanded the status bar with words, characters, reading time and live counts for the current selection, with full details on hover;
+- registered the new actions in the command palette;
+- fixed overlapping and unresponsive layout controls: only one floating overlay (explorer drawer, note details or contextual graph) is open at a time, overlays that duplicate a docked panel or another view close after resizing or switching views, the explorer drawer closes after a note is picked, overlays and the link-update dialog stay inside small windows, and the graph toolbar wraps instead of widening its window;
+- made the sidebar and inspector buttons reflect what is actually visible and leave Zen mode when they reveal a panel, and kept the header search button available whenever the sidebar is hidden;
+- renamed the application root from `WidgetApp` to `LiloApp`, grouped its transient state into focused workflow structures and removed the last pre-Lilo `RustWidgets` autostart cleanup;
+- removed a panic path from the navigation cache;
+- added repeatable 1,000- and 10,000-note benchmarks and cached quick-switcher results so large vaults stay responsive;
+- fixed analytics losing most counters: finished days that were not delivered before Lilo closed are now kept (up to seven days) and sent on a later launch, and every delivery is confirmed per day;
+- made the analytics Worker ignore unknown feature names from newer clients instead of rejecting the whole report, and accept reports up to seven days old;
+- added aggregate counters for the quick switcher, find, replace and autocompletion;
+- merged the Windows and Linux release workflows into one parallel release that publishes a single GitHub release, reduced repository traffic archiving from daily to weekly, and made CI cache builds, skip documentation-only changes and cancel superseded runs.
+
+The analytics Worker must be redeployed before this version is released so the new counters are stored.
+
 ## 0.2.2 — Vault Roots and Adaptive Workspace
 
 - added a native folder picker and made any selected directory the direct root of a new Markdown vault;
