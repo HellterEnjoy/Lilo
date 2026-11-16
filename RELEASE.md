@@ -88,6 +88,6 @@ powershell -ExecutionPolicy Bypass -File .\scripts\package-windows.ps1
 
 The packaging script creates the Windows installer, portable ZIP and SHA-256 files under `dist/`. Inno Setup 6 is required. Linux artifacts are built natively in their target environments.
 
-Pushing a `v<version>` tag runs `.github/workflows/release.yml`. The workflow verifies the tag against `Cargo.toml`, runs checks, publishes Windows artifacts and submits the matching WinGet update when `WINGET_GITHUB_TOKEN` is configured. Linux archives are uploaded to the same release after native verification.
+Pushing a `v<version>` tag runs `.github/workflows/release.yml`. The workflow verifies the tag against `Cargo.toml`, builds the Windows installer and ZIP, the Ubuntu 22.04 archive and the Arch Linux archive in parallel, publishes one GitHub release with all assets and SHA-256 files, and then submits the matching WinGet update when `WINGET_GITHUB_TOKEN` is configured. Linux archives are built locally with `VERSION=<version> PLATFORM=<platform> scripts/package-linux.sh`.
 
 The initial WinGet package is already published. A manually dispatched release can include or skip WinGet with its `publish_winget` option. If an automatic submission needs to be retried, run `.github/workflows/winget.yml` with the released version. Both paths call `scripts/submit-winget.ps1`, use package ID `HellterEnjoy.Lilo` and require the `WINGET_GITHUB_TOKEN` Actions secret.

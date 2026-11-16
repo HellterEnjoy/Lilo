@@ -5,10 +5,31 @@ on:
     branches:
       - main
       - "code/**"
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "assets/**"
+      - "winget/**"
+      - "analytics-worker/**"
+      - ".github/workflows/collect-traffic.yml"
+      - ".github/scripts/**"
   pull_request:
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "assets/**"
+      - "winget/**"
+      - "analytics-worker/**"
+      - ".github/workflows/collect-traffic.yml"
+      - ".github/scripts/**"
 
 permissions:
   contents: read
+
+# A newer push to the same branch or pull request supersedes the running checks.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -48,11 +69,14 @@ jobs:
           rustup default stable
           rustup component add rustfmt clippy
 
+      - name: Cache Cargo registry and build output
+        uses: Swatinem/rust-cache@v2
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Run tests
-        run: cargo test --locked
-
       - name: Run Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --locked

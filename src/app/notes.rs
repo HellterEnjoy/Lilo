@@ -1,6 +1,6 @@
 use super::*;
 
-impl WidgetApp {
+impl LiloApp {
     pub(super) fn create_note(&mut self) {
         let note_directory = match storage::ensure_note_folder(
             &self.storage_paths.notes_dir,
@@ -396,7 +396,7 @@ impl WidgetApp {
         match storage::create_note_folder(
             &self.storage_paths.notes_dir,
             &self.settings.selected_folder,
-            &self.new_folder_name,
+            &self.folders.new_name,
         ) {
             Ok(relative_path) => {
                 if !self.folder_paths.contains(&relative_path) {
@@ -404,8 +404,8 @@ impl WidgetApp {
                     self.folder_paths.sort();
                 }
                 self.settings.selected_folder = relative_path;
-                self.new_folder_name.clear();
-                self.show_new_folder_input = false;
+                self.folders.new_name.clear();
+                self.folders.show_new_input = false;
                 self.vault_snapshot =
                     storage::vault_snapshot(&self.storage_paths.notes_dir).unwrap_or_default();
                 self.record_analytics(AnalyticsFeature::FolderCreated);
@@ -459,13 +459,13 @@ impl WidgetApp {
     }
 
     pub(super) fn rename_selected_folder(&mut self) {
-        let Some(source) = self.editing_folder.clone() else {
+        let Some(source) = self.folders.editing.clone() else {
             return;
         };
         match storage::rename_folder(
             &self.storage_paths.notes_dir,
             &source,
-            &self.folder_name_buffer,
+            &self.folders.name_buffer,
         ) {
             Ok(destination) => {
                 for note in &mut self.data.notes {
@@ -493,8 +493,8 @@ impl WidgetApp {
                 }
                 self.folder_paths.sort();
                 self.settings.selected_folder = destination;
-                self.editing_folder = None;
-                self.folder_name_buffer.clear();
+                self.folders.editing = None;
+                self.folders.name_buffer.clear();
                 self.vault_snapshot =
                     storage::vault_snapshot(&self.storage_paths.notes_dir).unwrap_or_default();
                 self.link_index = LinkIndex::build(&self.data.notes, &self.storage_paths.notes_dir);
@@ -543,7 +543,8 @@ impl WidgetApp {
                         report.trashed_note_ids.len()
                     ));
                 } else {
-                    self.diagnostics
+                    self.recovery
+                        .diagnostics
                         .extend(report.failures.iter().map(|failure| {
                             format!(
                                 "Could not move '{}' to Trash ({}): {}",
@@ -552,7 +553,8 @@ impl WidgetApp {
                                 failure.error
                             )
                         }));
-                    self.diagnostics
+                    self.recovery
+                        .diagnostics
                         .extend(report.retained_files.iter().map(|file| {
                             format!(
                                 "Folder retained because it contains a non-note file: {}",
@@ -575,14 +577,14 @@ impl WidgetApp {
             return;
         }
 
-        if !self.is_navigating_history
+        if !self.history.navigating
             && let Some(cur_id) = self.data.selected_note_id
             && cur_id != id
         {
-            self.history_back.push(cur_id);
-            self.history_forward.clear();
-            if self.history_back.len() > 50 {
-                self.history_back.remove(0);
+            self.history.back.push(cur_id);
+            self.history.forward.clear();
+            if self.history.back.len() > 50 {
+                self.history.back.remove(0);
             }
         }
         self.data.selected_note_id = Some(id);
@@ -601,14 +603,14 @@ impl WidgetApp {
     }
 
     pub(super) fn navigate_back(&mut self) {
-        while let Some(prev_id) = self.history_back.pop() {
+        while let Some(prev_id) = self.history.back.pop() {
             if self.data.notes.iter().any(|note| note.id == prev_id) {
                 if let Some(cur_id) = self.data.selected_note_id {
-                    self.history_forward.push(cur_id);
+                    self.history.forward.push(cur_id);
                 }
-                self.is_navigating_history = true;
+                self.history.navigating = true;
                 self.open_note(prev_id);
-                self.is_navigating_history = false;
+                self.history.navigating = false;
                 self.activate_view(AppView::Editor);
                 break;
             }
@@ -616,14 +618,14 @@ impl WidgetApp {
     }
 
     pub(super) fn navigate_forward(&mut self) {
-        while let Some(next_id) = self.history_forward.pop() {
+        while let Some(next_id) = self.history.forward.pop() {
             if self.data.notes.iter().any(|note| note.id == next_id) {
                 if let Some(cur_id) = self.data.selected_note_id {
-                    self.history_back.push(cur_id);
+                    self.history.back.push(cur_id);
                 }
-                self.is_navigating_history = true;
+                self.history.navigating = true;
                 self.open_note(next_id);
-                self.is_navigating_history = false;
+                self.history.navigating = false;
                 self.activate_view(AppView::Editor);
                 break;
             }

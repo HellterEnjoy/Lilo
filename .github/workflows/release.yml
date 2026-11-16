@@ -1,4 +1,7 @@
-name: Release Windows package
+name: Release
+
+# One workflow builds every package in parallel, then publishes a single GitHub
+# release with all assets and finally submits the WinGet update.
 
 on:
   push:
@@ -7,51 +10,82 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing release tag, for example v0.1.0
+        description: Existing release tag, for example v0.2.3
         required: true
         type: string
       publish_winget:
-        description: Submit a WinGet update after uploading the installer
+        description: Submit a WinGet update after publishing the release
         required: true
         default: true
         type: boolean
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  LINUX_DEPENDENCIES: >-
+    libssl-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev
+    libxcb-xfixes0-dev libxkbcommon-dev libxkbcommon-x11-dev pkg-config
 
 jobs:
-  release:
-    runs-on: windows-latest
-    env:
-      GH_TOKEN: ${{ github.token }}
-      WINGET_GITHUB_TOKEN: ${{ secrets.WINGET_GITHUB_TOKEN }}
+  prepare:
+    name: Verify tag and version
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
 
     steps:
-      - name: Check out source
-        uses: actions/checkout@v4
+      - name: Check out tagged source
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+          persist-credentials: false
 
       - name: Resolve and verify version
         id: version
-        shell: pwsh
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
-          $tag = if ('${{ github.event_name }}' -eq 'workflow_dispatch') { '${{ inputs.tag }}' } else { '${{ github.ref_name }}' }
-          if ($tag -notmatch '^v(?<version>\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$') {
-            throw "Release tag '$tag' must use the vX.Y.Z format."
-          }
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            tag="${INPUT_TAG}"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          if [[ ! "$tag" =~ ^v([0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?)$ ]]; then
+            echo "Release tag '$tag' must use the vX.Y.Z format." >&2
+            exit 1
+          fi
+          version="${BASH_REMATCH[1]}"
+          cargo_version="$(sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]+)"/\1/p' Cargo.toml | head -n 1)"
+          if [[ "$cargo_version" != "$version" ]]; then
+            echo "Tag version '$version' does not match Cargo.toml version '$cargo_version'." >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
-          $cargoManifest = Get-Content -LiteralPath 'Cargo.toml' -Raw
-          $cargoVersion = [regex]::Match($cargoManifest, '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
-          if ($cargoVersion -ne $Matches.version) {
-            throw "Tag version '$($Matches.version)' does not match Cargo.toml version '$cargoVersion'."
-          }
+  windows:
+    name: Windows package
+    needs: prepare
+    runs-on: windows-latest
 
-          "tag=$tag" >> $env:GITHUB_OUTPUT
-          "version=$cargoVersion" >> $env:GITHUB_OUTPUT
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Run tests
         run: cargo test --locked
@@ -63,43 +97,139 @@ jobs:
         shell: pwsh
         run: .\scripts\package-windows.ps1
 
-      - name: Create or update GitHub release
-        shell: pwsh
-        run: |
-          $version = '${{ steps.version.outputs.version }}'
-          $tag = '${{ steps.version.outputs.tag }}'
-          $assets = @(
-            "dist/Lilo-$version-windows-x64.zip",
-            "dist/Lilo-$version-windows-x64.zip.sha256",
-            "dist/Lilo-$version-windows-x64-setup.exe",
-            "dist/Lilo-$version-windows-x64-setup.exe.sha256"
-          )
+      - name: Upload Windows packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            dist/*.zip
+            dist/*.exe
+            dist/*.sha256
+          if-no-files-found: error
 
-          gh release view $tag *> $null
-          if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag @assets --clobber
-          }
-          else {
-            $releaseNotice = @"
-          > [!WARNING]
-          > Lilo is still under active development. Although this release passed automated checks, bugs may remain and some functionality may behave differently or fail on particular systems, desktop environments or vaults. Keep a current vault backup and report reproducible problems through GitHub Issues.
-          "@
-            gh release create $tag @assets --title "Lilo $version" --generate-notes --notes $releaseNotice --verify-tag
-          }
-          if ($LASTEXITCODE -ne 0) {
-            throw 'GitHub release publishing failed.'
-          }
+  ubuntu:
+    name: Ubuntu 22.04 package
+    needs: prepare
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          persist-credentials: false
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes $LINUX_DEPENDENCIES
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build and package
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          PLATFORM: ubuntu-22.04
+        run: bash scripts/package-linux.sh
+
+      - name: Upload Ubuntu package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu
+          path: dist/*.tar.gz*
+          if-no-files-found: error
+
+  arch:
+    name: Arch Linux package
+    needs: prepare
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            base-devel ca-certificates cargo git libxcb libxkbcommon-x11 \
+            openssl pkgconf rust wayland
+
+      - name: Check out tagged source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          persist-credentials: false
+
+      - name: Build and package
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          PLATFORM: arch
+        run: bash scripts/package-linux.sh
+
+      - name: Upload Arch Linux package
+        uses: actions/upload-artifact@v4
+        with:
+          name: arch
+          path: dist/*.tar.gz*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: [prepare, windows, ubuntu, arch]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+
+    steps:
+      - name: Download all packages
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create or update the release
+        run: |
+          set -euo pipefail
+          ls -l dist
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            notice='> [!WARNING]
+          > Lilo is still under active development. Although this release passed automated checks, bugs may remain and some functionality may behave differently or fail on particular systems, desktop environments or vaults. Keep a current vault backup and report reproducible problems through GitHub Issues.'
+            gh release create "$TAG" dist/* --title "Lilo $VERSION" \
+              --generate-notes --notes "$notice" --verify-tag
+          fi
+
+  winget:
+    name: Submit WinGet update
+    needs: [prepare, publish]
+    if: ${{ github.event_name == 'push' || inputs.publish_winget }}
+    runs-on: windows-latest
+    env:
+      WINGET_GITHUB_TOKEN: ${{ secrets.WINGET_GITHUB_TOKEN }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          persist-credentials: false
 
       - name: Submit WinGet update
-        if: ${{ env.WINGET_GITHUB_TOKEN != '' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_winget)) }}
+        if: ${{ env.WINGET_GITHUB_TOKEN != '' }}
         shell: pwsh
         run: |
           .\scripts\submit-winget.ps1 `
-            -Version '${{ steps.version.outputs.version }}' `
-            -Tag '${{ steps.version.outputs.tag }}' `
+            -Version '${{ needs.prepare.outputs.version }}' `
+            -Tag '${{ needs.prepare.outputs.tag }}' `
             -Repository '${{ github.repository }}'
 
       - name: Explain skipped WinGet submission
-        if: ${{ env.WINGET_GITHUB_TOKEN == '' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_winget)) }}
+        if: ${{ env.WINGET_GITHUB_TOKEN == '' }}
         shell: pwsh
-        run: Write-Warning 'WINGET_GITHUB_TOKEN is not configured; release assets were published, but WinGet was not updated.'
+        run: Write-Warning 'WINGET_GITHUB_TOKEN is not configured; the release was published, but WinGet was not updated.'

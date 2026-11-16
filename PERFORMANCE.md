@@ -16,6 +16,32 @@ Lilo keeps the compact interface responsive with bounded work rather than loadin
 - A failed or read-only note no longer aborts the remaining writes in a reviewed bulk operation.
 - Link and tag indexes refresh after a short typing pause instead of rebuilding on every keystroke; explicit metadata changes refresh immediately.
 
+- The Ctrl+O quick switcher caches ranked results until the query or the vault changes.
+- Autocompletion ranks candidates only when the typed link or tag changes, and find highlights at most 2,000 matches.
+
+## Large-vault benchmarks
+
+Repeatable benchmarks generate interlinked, tagged vaults of 1,000 and 10,000 notes. They are ignored by default; run them with a release build:
+
+```bash
+cargo test --release benchmarks -- --ignored --nocapture --test-threads=1
+```
+
+Reference results from a Windows 11 development machine (release build, NVMe SSD):
+
+| Operation | 1,000 notes | 10,000 notes |
+| --- | ---: | ---: |
+| Load vault from disk | 128 ms | 1.18 s |
+| Vault snapshot (external-change watcher) | 15 ms | 27 ms |
+| Build link index | 4.7 ms | 49 ms |
+| Build tag index | 3.1 ms | 35 ms |
+| Structured search across all notes | 0.7 ms | 8.8 ms |
+| Quick switcher query (uncached) | 2.4 ms | 24 ms |
+| Wiki-link completion ranking | 0.4 ms | 4.4 ms |
+| Incremental link refresh for one note | 0.07 ms | 0.8 ms |
+
+Practical guidance: up to 10,000 notes all interactive operations stay well under a frame budget once indexes are built; startup loading is the main cost at that size and is the next optimisation target.
+
 ## Automated workloads
 
 The test suite includes regression workloads for:

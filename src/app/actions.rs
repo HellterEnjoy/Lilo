@@ -1,6 +1,6 @@
 use super::*;
 
-impl WidgetApp {
+impl LiloApp {
     pub(super) fn activate_view(&mut self, view: AppView) {
         if view == AppView::Graph && self.view != AppView::Graph {
             self.record_analytics(AnalyticsFeature::GraphOpened);
@@ -166,6 +166,19 @@ impl WidgetApp {
                 self.open_or_create_daily_note_for_date(LocalDateService::next_day(cur));
             }
             CommandAction::QuickCapture => self.quick_capture_state.open(),
+            CommandAction::QuickSwitcher => {
+                self.command_palette_state.close();
+                self.quick_switcher.open();
+            }
+            CommandAction::FindInNote | CommandAction::ReplaceInNote => {
+                if self.data.selected_note().is_some() {
+                    self.record_analytics(AnalyticsFeature::FindInNoteUsed);
+                    self.activate_view(AppView::Editor);
+                    self.focus_editor = false;
+                    self.find
+                        .open_bar(matches!(action, CommandAction::ReplaceInNote), None);
+                }
+            }
             CommandAction::NewNoteFromTemplate => {
                 self.template_selector_open = true;
                 self.template_selector_for_new_note = true;
@@ -187,7 +200,7 @@ impl WidgetApp {
                     self.pending_delete_id = Some(id);
                 }
             }
-            CommandAction::NoteDetails => self.note_details_open = true,
+            CommandAction::NoteDetails => self.open_overlay(layout::Overlay::NoteDetails),
             CommandAction::ViewEditor => self.activate_view(AppView::Editor),
             CommandAction::ViewNotesList => self.activate_view(AppView::NotesList),
             CommandAction::ViewGraph => self.activate_view(AppView::Graph),
@@ -196,8 +209,8 @@ impl WidgetApp {
             CommandAction::HistoryBack => self.navigate_back(),
             CommandAction::HistoryForward => self.navigate_forward(),
             CommandAction::ToggleGraphOverlay => {
-                self.graph_overlay_open = !self.graph_overlay_open;
-                if self.graph_overlay_open {
+                self.toggle_overlay(layout::Overlay::Graph);
+                if self.overlay_is(layout::Overlay::Graph) {
                     self.record_analytics(AnalyticsFeature::GraphOpened);
                 }
             }
@@ -244,12 +257,12 @@ impl WidgetApp {
                 self.activate_view(AppView::Settings);
             }
             CommandAction::ScanDiagnostics => {
-                self.recovery_tab = RecoveryTab::Diagnostics;
+                self.recovery.tab = RecoveryTab::Diagnostics;
                 self.activate_view(AppView::Trash);
             }
             CommandAction::NewFolder => {
                 self.activate_view(AppView::NotesList);
-                self.show_new_folder_input = true;
+                self.folders.show_new_input = true;
             }
             CommandAction::DeleteFolder => {
                 let folder = self.settings.selected_folder.clone();
@@ -268,8 +281,8 @@ impl WidgetApp {
                     if count == 0 {
                         self.delete_folder(&folder);
                     } else {
-                        self.pending_folder_delete = Some(folder);
-                        self.pending_folder_notes_count = count;
+                        self.folders.pending_delete = Some(folder);
+                        self.folders.pending_delete_notes_count = count;
                     }
                 }
             }

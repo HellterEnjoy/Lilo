@@ -1,12 +1,12 @@
 use super::*;
 
-impl WidgetApp {
+impl LiloApp {
     pub(super) fn show_trash(&mut self, ui: &mut egui::Ui) {
         ui.set_max_width(ui.available_width().min(900.0));
         ui.horizontal(|ui| {
             ui_style::screen_title(
                 ui,
-                match self.recovery_tab {
+                match self.recovery.tab {
                     RecoveryTab::Trash => "Trash",
                     RecoveryTab::Backups => "Backups",
                     RecoveryTab::Diagnostics => "Diagnostics",
@@ -14,16 +14,16 @@ impl WidgetApp {
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.selectable_value(
-                    &mut self.recovery_tab,
+                    &mut self.recovery.tab,
                     RecoveryTab::Diagnostics,
                     "Diagnostics",
                 );
-                ui.selectable_value(&mut self.recovery_tab, RecoveryTab::Backups, "Backups");
-                ui.selectable_value(&mut self.recovery_tab, RecoveryTab::Trash, "Trash");
+                ui.selectable_value(&mut self.recovery.tab, RecoveryTab::Backups, "Backups");
+                ui.selectable_value(&mut self.recovery.tab, RecoveryTab::Trash, "Trash");
             });
         });
         ui.add_space(4.0);
-        match self.recovery_tab {
+        match self.recovery.tab {
             RecoveryTab::Trash => self.show_trash_tab(ui),
             RecoveryTab::Backups => self.show_backups_tab(ui),
             RecoveryTab::Diagnostics => self.show_diagnostics_tab(ui),
@@ -101,8 +101,8 @@ impl WidgetApp {
                     .max_height(list_height)
                     .show(ui, |ui| {
                         for entry in entries {
-                            let selected =
-                                self.selected_backup.as_ref() == Some(&entry.relative_path);
+                            let selected = self.recovery.selected_backup.as_ref()
+                                == Some(&entry.relative_path);
                             let response = ui.selectable_label(
                                 selected,
                                 format!(
@@ -111,8 +111,8 @@ impl WidgetApp {
                                 ),
                             );
                             if response.clicked() {
-                                self.selected_backup = Some(entry.relative_path.clone());
-                                self.backup_preview = storage::backup_preview(
+                                self.recovery.selected_backup = Some(entry.relative_path.clone());
+                                self.recovery.backup_preview = storage::backup_preview(
                                     &self.storage_paths,
                                     &entry.relative_path,
                                 )
@@ -130,14 +130,14 @@ impl WidgetApp {
                             }
                         }
                     });
-                if !self.backup_preview.is_empty() {
+                if !self.recovery.backup_preview.is_empty() {
                     ui.separator();
                     ui.small("Backup preview");
                     egui::ScrollArea::vertical()
                         .max_height((ui.available_height() - 32.0).max(80.0))
                         .show(ui, |ui| {
                             ui.add(
-                                egui::TextEdit::multiline(&mut self.backup_preview)
+                                egui::TextEdit::multiline(&mut self.recovery.backup_preview)
                                     .interactive(false)
                                     .desired_width(f32::INFINITY),
                             );
@@ -195,16 +195,17 @@ impl WidgetApp {
         ui.add_space(6.0);
         ui.small("Diagnostics only reads the vault. It reports malformed notes, missing or malformed attachment links, and unavailable managed folders.");
         if ui.button("Scan vault now").clicked() {
-            self.diagnostics = storage::vault_diagnostics(&self.storage_paths, &self.settings)
-                .unwrap_or_else(|error| vec![format!("Diagnostics failed: {error}")]);
+            self.recovery.diagnostics =
+                storage::vault_diagnostics(&self.storage_paths, &self.settings)
+                    .unwrap_or_else(|error| vec![format!("Diagnostics failed: {error}")]);
         }
-        if self.diagnostics.is_empty() {
+        if self.recovery.diagnostics.is_empty() {
             ui.add_space(20.0);
             ui.colored_label(ui.visuals().hyperlink_color, "No vault problems detected");
         } else {
             ui.small("Files are never rewritten merely by running diagnostics.");
             egui::ScrollArea::vertical().show(ui, |ui| {
-                for diagnostic in &self.diagnostics {
+                for diagnostic in &self.recovery.diagnostics {
                     ui.colored_label(ui.visuals().warn_fg_color, diagnostic);
                     ui.add_space(4.0);
                 }

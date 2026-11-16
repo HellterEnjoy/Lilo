@@ -1,13 +1,13 @@
 use super::*;
 
-impl WidgetApp {
+impl LiloApp {
     pub(super) fn handle_graph_output(&mut self, output: graph::GraphOutput) -> bool {
         if output.persist_layout {
             self.settings.graph_node_offsets = self.graph_state.persisted_offsets();
             self.save_settings();
         }
         if output.expand {
-            self.graph_overlay_open = false;
+            self.close_overlay(layout::Overlay::Graph);
             self.graph_fullscreen = !self.graph_fullscreen;
             self.activate_view(AppView::Graph);
         }
@@ -101,7 +101,7 @@ impl WidgetApp {
             });
             ui.horizontal(|ui| {
                 let tag_input = ui.add(
-                    egui::TextEdit::singleline(&mut self.new_tag)
+                    egui::TextEdit::singleline(&mut self.tags_ui.new_tag)
                         .hint_text("new tag")
                         .desired_width(120.0),
                 );
@@ -109,7 +109,7 @@ impl WidgetApp {
                     || (tag_input.lost_focus()
                         && ui.input(|input| input.key_pressed(egui::Key::Enter)));
                 if submit_tag {
-                    let tag = tags::clean_tag(&self.new_tag);
+                    let tag = tags::clean_tag(&self.tags_ui.new_tag);
                     if !tag.is_empty()
                         && !note
                             .tags
@@ -117,7 +117,7 @@ impl WidgetApp {
                             .any(|existing| tags::clean_tag(existing) == tag)
                     {
                         note.tags.push(tag);
-                        self.new_tag.clear();
+                        self.tags_ui.new_tag.clear();
                         changed = true;
                     }
                 }
@@ -137,15 +137,15 @@ impl WidgetApp {
             });
             ui.horizontal(|ui| {
                 ui.add(
-                    egui::TextEdit::singleline(&mut self.new_alias)
+                    egui::TextEdit::singleline(&mut self.tags_ui.new_alias)
                         .hint_text("new alias")
                         .desired_width(120.0),
                 );
                 if ui.button("Add alias").clicked() {
-                    let alias = self.new_alias.trim();
+                    let alias = self.tags_ui.new_alias.trim();
                     if !alias.is_empty() && !note.aliases.iter().any(|existing| existing == alias) {
                         note.aliases.push(alias.to_owned());
-                        self.new_alias.clear();
+                        self.tags_ui.new_alias.clear();
                         changed = true;
                     }
                 }
@@ -199,7 +199,7 @@ impl WidgetApp {
                     )
                     .clicked()
                     {
-                        self.graph_overlay_open = true;
+                        self.open_overlay(layout::Overlay::Graph);
                     }
                 }
                 _ => {

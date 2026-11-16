@@ -7,7 +7,7 @@ pub(super) struct NavigationIndex {
     pub outgoing: HashMap<Uuid, Vec<String>>,
 }
 
-impl WidgetApp {
+impl LiloApp {
     pub(super) fn navigation_index(&mut self) -> Arc<NavigationIndex> {
         let mut hash = std::collections::hash_map::DefaultHasher::new();
         (
@@ -17,62 +17,46 @@ impl WidgetApp {
         )
             .hash(&mut hash);
         let key = hash.finish();
-        if self
-            .navigation_cache
-            .as_ref()
-            .is_none_or(|(old, _)| *old != key)
+        if let Some((cached_key, index)) = &self.navigation_cache
+            && *cached_key == key
         {
-            let titles: HashMap<_, _> = self
-                .data
+            return Arc::clone(index);
+        }
+        let titles: HashMap<_, _> = self
+            .data
+            .notes
+            .iter()
+            .map(|note| (note.id, &note.title))
+            .collect();
+        let outgoing =
+            self.data
                 .notes
                 .iter()
-                .map(|note| (note.id, &note.title))
-                .collect();
-            let outgoing =
-                self.data
-                    .notes
-                    .iter()
-                    .map(|note| {
-                        let targets =
-                            self.link_index
-                                .links_for(note.id)
-                                .map_or_else(Vec::new, |links| {
-                                    let mut targets = links.unresolved.clone();
-                                    targets.extend(links.outgoing.iter().filter_map(|id| {
+                .map(|note| {
+                    let targets =
+                        self.link_index
+                            .links_for(note.id)
+                            .map_or_else(Vec::new, |links| {
+                                let mut targets = links.unresolved.clone();
+                                targets.extend(
+                                    links.outgoing.iter().filter_map(|id| {
                                         titles.get(id).map(|title| (*title).clone())
-                                    }));
-                                    targets
-                                });
-                        (note.id, targets)
-                    })
-                    .collect();
-            let mut tree = folders::FolderTree::build(
-                &self.data.notes,
-                &self.storage_paths.notes_dir,
-                &self.folder_paths,
-            );
-            tree.root.name = storage::vault_name(&self.settings.vault_path);
-            self.navigation_cache = Some((key, Arc::new(NavigationIndex { tree, outgoing })));
-        }
-        Arc::clone(&self.navigation_cache.as_ref().unwrap().1)
-    }
-
-    pub(super) fn toggle_explorer(&mut self) {
-        if self.viewport_width < ui_style::NAV_BREAKPOINT {
-            self.explorer_drawer_open = !self.explorer_drawer_open;
-        } else {
-            self.settings.left_sidebar_open = !self.settings.left_sidebar_open;
-            self.save_settings();
-        }
-    }
-
-    pub(super) fn toggle_inspector(&mut self) {
-        if self.viewport_width < ui_style::WIDE_BREAKPOINT {
-            self.note_details_open = !self.note_details_open;
-        } else {
-            self.settings.right_sidebar_open = !self.settings.right_sidebar_open;
-            self.save_settings();
-        }
+                                    }),
+                                );
+                                targets
+                            });
+                    (note.id, targets)
+                })
+                .collect();
+        let mut tree = folders::FolderTree::build(
+            &self.data.notes,
+            &self.storage_paths.notes_dir,
+            &self.folder_paths,
+        );
+        tree.root.name = storage::vault_name(&self.settings.vault_path);
+        let index = Arc::new(NavigationIndex { tree, outgoing });
+        self.navigation_cache = Some((key, Arc::clone(&index)));
+        index
     }
 
     pub(super) fn show_workspace_header(&mut self, ui: &mut egui::Ui) {
@@ -80,7 +64,7 @@ impl WidgetApp {
             if ui_style::icon_button(
                 ui,
                 Icon::SidebarLeft,
-                self.settings.left_sidebar_open,
+                self.layout.left_panel,
                 "Toggle sidebar (Ctrl+Shift+B)",
             )
             .clicked()
@@ -106,14 +90,14 @@ impl WidgetApp {
                     && ui_style::icon_button(
                         ui,
                         Icon::SidebarRight,
-                        self.settings.right_sidebar_open,
+                        self.layout.right_panel || self.overlay_is(layout::Overlay::NoteDetails),
                         "Note context (Ctrl+Shift+I)",
                     )
                     .clicked()
                 {
                     self.handle_command_action(CommandAction::ToggleRightInspector);
                 }
-                if !self.settings.left_sidebar_open
+                if !self.layout.left_panel
                     && ui_style::icon_button(ui, Icon::Search, false, "Search (Ctrl+K)").clicked()
                 {
                     self.command_palette_state.open();

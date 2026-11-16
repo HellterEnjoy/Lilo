@@ -4,7 +4,7 @@ Lilo is a compact, local-first Markdown notebook. The roadmap favors a fast edit
 
 ## Current release line
 
-Version `0.2.2` is the current application version.
+Version `0.2.3` is the current application version.
 
 | Version | Status | Main result |
 | --- | --- | --- |
@@ -14,20 +14,19 @@ Version `0.2.2` is the current application version.
 | 0.2.0 | Complete | Hierarchical tags, saved searches, attachments, image paste and the connected knowledge workflow. |
 | 0.2.1 | Complete | Explicit analytics consent, configurable autosave and responsiveness work. |
 | 0.2.2 | Complete | Direct folder vaults, adaptive compact/expanded layouts, inline media and safe bulk changes. |
+| 0.2.3 | Complete | Autocompletion, find and replace, quick switcher, writing statistics, large-vault benchmarks and reliable analytics delivery. |
 
 See [CHANGELOG.md](CHANGELOG.md) for the exact implemented changes in each release.
 
-## 0.2.3 — Large-vault performance
+## 0.2.4 — Large-vault performance and platform integration
 
-- benchmark startup, search, tags and links with 1,000 and 10,000 notes;
-- extend incremental indexing where measurements justify it;
+Benchmarks with 1,000 and 10,000 notes now ship with the test suite (see [PERFORMANCE.md](PERFORMANCE.md)). Remaining performance work:
+
+- reduce vault startup time, which dominates at 10,000 notes;
 - bound decoded-image memory and release unused resources;
-- profile dense graph layout and interaction;
-- publish repeatable fixtures and practical limits.
+- profile dense graph layout and interaction.
 
-## 0.2.4 — Platform integration and distribution
-
-The initial WinGet package is now live as `HellterEnjoy.Lilo`. Remaining work:
+The initial WinGet package is now live as `HellterEnjoy.Lilo`. Remaining distribution work:
 
 - keep WinGet updates aligned with GitHub releases;
 - harden Windows global-hotkey registration and shutdown cleanup;

@@ -2,7 +2,8 @@ name: Archive GitHub traffic
 
 on:
   schedule:
-    - cron: "17 3 * * *"
+    # GitHub keeps 14 days of traffic history, so a weekly snapshot loses nothing.
+    - cron: "17 3 * * 1"
   workflow_dispatch:
 
 permissions:

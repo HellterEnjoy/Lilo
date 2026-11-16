@@ -1,6 +1,6 @@
 use super::*;
 
-impl WidgetApp {
+impl LiloApp {
     pub(super) fn save_settings(&mut self) -> bool {
         self.settings.selected_note_id = self.data.selected_note_id;
         if let Err(error) =
@@ -14,21 +14,21 @@ impl WidgetApp {
 
     pub(super) fn record_analytics(&mut self, feature: AnalyticsFeature) {
         if self.settings.analytics.record(feature) {
-            self.analytics_dirty = true;
+            self.analytics.dirty = true;
         }
     }
 
     pub(super) fn set_analytics_enabled(&mut self, enabled: bool) {
         if enabled {
             self.settings.analytics.enable();
-            self.analytics_dirty = true;
-            self.analytics_next_send = Instant::now() + ANALYTICS_INITIAL_DELAY;
-            self.analytics_status = Some("Analytics enabled".to_owned());
+            self.analytics.dirty = true;
+            self.analytics.next_send = Instant::now() + ANALYTICS_INITIAL_DELAY;
+            self.analytics.status = Some("Analytics enabled".to_owned());
         } else {
             self.settings.analytics.disable_and_queue_deletion();
-            self.analytics_dirty = false;
-            self.analytics_next_delete_attempt = Instant::now();
-            self.analytics_status = Some(
+            self.analytics.dirty = false;
+            self.analytics.next_delete_attempt = Instant::now();
+            self.analytics.status = Some(
                 "Analytics disabled; previously collected data is queued for deletion".to_owned(),
             );
         }
@@ -36,37 +36,37 @@ impl WidgetApp {
     }
 
     pub(super) fn process_analytics(&mut self, ctx: &egui::Context) {
-        while let Some(result) = self.analytics_client.try_result() {
+        while let Some(result) = self.analytics.client.try_result() {
             match result {
-                AnalyticsResult::Delivered(AnalyticsOperation::DailyReport, _) => {
-                    self.analytics_report_in_flight = false;
-                    self.analytics_status = Some("Latest daily counters delivered".to_owned());
-                }
-                AnalyticsResult::Delivered(
-                    AnalyticsOperation::DeleteInstallation,
-                    Some(installation_id),
-                ) => {
-                    self.analytics_deletion_in_flight = false;
-                    self.settings.analytics.finish_deletion(installation_id);
-                    self.analytics_status = Some("Collected analytics data deleted".to_owned());
+                AnalyticsResult::ReportDelivered(date) => {
+                    self.analytics.report_in_flight = false;
+                    self.analytics.status = Some(format!("Usage counters for {date} delivered"));
+                    if self.settings.analytics.confirm_delivered(&date) {
+                        // Older finished days are still waiting; send the next one right away.
+                        self.analytics.dirty = true;
+                        self.analytics.next_send = Instant::now();
+                    }
                     self.save_settings();
                 }
-                AnalyticsResult::Delivered(AnalyticsOperation::DeleteInstallation, None) => {
-                    self.analytics_deletion_in_flight = false;
-                }
-                AnalyticsResult::Failed(AnalyticsOperation::DailyReport) => {
-                    self.analytics_report_in_flight = false;
-                    self.analytics_dirty = true;
-                    self.analytics_next_send = Instant::now() + ANALYTICS_UPDATE_INTERVAL;
-                    self.analytics_status = Some(
+                AnalyticsResult::ReportFailed => {
+                    self.analytics.report_in_flight = false;
+                    self.analytics.dirty = true;
+                    self.analytics.next_send = Instant::now() + ANALYTICS_RETRY_INTERVAL;
+                    self.analytics.status = Some(
                         "Analytics delivery failed; Lilo will retry without interrupting your work"
                             .to_owned(),
                     );
                 }
-                AnalyticsResult::Failed(AnalyticsOperation::DeleteInstallation) => {
-                    self.analytics_deletion_in_flight = false;
-                    self.analytics_next_delete_attempt = Instant::now() + ANALYTICS_UPDATE_INTERVAL;
-                    self.analytics_status =
+                AnalyticsResult::DeletionDelivered(installation_id) => {
+                    self.analytics.deletion_in_flight = false;
+                    self.settings.analytics.finish_deletion(installation_id);
+                    self.analytics.status = Some("Collected analytics data deleted".to_owned());
+                    self.save_settings();
+                }
+                AnalyticsResult::DeletionFailed => {
+                    self.analytics.deletion_in_flight = false;
+                    self.analytics.next_delete_attempt = Instant::now() + ANALYTICS_RETRY_INTERVAL;
+                    self.analytics.status =
                         Some("Deletion is pending and will be retried automatically".to_owned());
                 }
             }
@@ -74,33 +74,34 @@ impl WidgetApp {
 
         let now = Instant::now();
         if let Some(installation_id) = self.settings.analytics.pending_deletion_id
-            && !self.analytics_deletion_in_flight
-            && now >= self.analytics_next_delete_attempt
-            && self.analytics_client.delete_installation(installation_id)
+            && !self.analytics.deletion_in_flight
+            && now >= self.analytics.next_delete_attempt
+            && self.analytics.client.delete_installation(installation_id)
         {
-            self.analytics_deletion_in_flight = true;
+            self.analytics.deletion_in_flight = true;
         }
 
         if self.settings.analytics.enabled()
-            && self.analytics_dirty
-            && !self.analytics_report_in_flight
-            && now >= self.analytics_next_send
-            && let Some(payload) = self.settings.analytics.daily_payload()
-            && self.analytics_client.send_daily(payload)
+            && self.analytics.dirty
+            && !self.analytics.report_in_flight
+            && now >= self.analytics.next_send
+            && let Some(payload) = self.settings.analytics.next_payload()
+            && self.analytics.client.send_daily(payload)
         {
-            self.analytics_dirty = false;
-            self.analytics_report_in_flight = true;
-            self.analytics_next_send = now + ANALYTICS_UPDATE_INTERVAL;
+            self.analytics.dirty = false;
+            self.analytics.report_in_flight = true;
+            self.analytics.next_send = now + ANALYTICS_UPDATE_INTERVAL;
             self.save_settings();
         }
 
-        if self.analytics_report_in_flight || self.analytics_deletion_in_flight {
+        if self.analytics.report_in_flight || self.analytics.deletion_in_flight {
             ctx.request_repaint_after(Duration::from_secs(1));
-        } else if self.settings.analytics.enabled() && self.analytics_dirty {
-            ctx.request_repaint_after(self.analytics_next_send.saturating_duration_since(now));
+        } else if self.settings.analytics.enabled() && self.analytics.dirty {
+            ctx.request_repaint_after(self.analytics.next_send.saturating_duration_since(now));
         } else if self.settings.analytics.pending_deletion_id.is_some() {
             ctx.request_repaint_after(
-                self.analytics_next_delete_attempt
+                self.analytics
+                    .next_delete_attempt
                     .saturating_duration_since(now),
             );
         }
@@ -160,7 +161,7 @@ impl WidgetApp {
                 self.set_analytics_enabled(true);
             } else {
                 self.settings.analytics.decline();
-                self.analytics_status = Some("Analytics disabled".to_owned());
+                self.analytics.status = Some("Analytics disabled".to_owned());
                 self.save_settings();
             }
         }
@@ -316,11 +317,11 @@ impl WidgetApp {
         }
 
         if !failure_details.is_empty() {
-            self.diagnostics.extend(success_details);
-            self.diagnostics.extend(failure_details);
-            if self.diagnostics.len() > 200 {
-                let excess = self.diagnostics.len() - 200;
-                self.diagnostics.drain(..excess);
+            self.recovery.diagnostics.extend(success_details);
+            self.recovery.diagnostics.extend(failure_details);
+            if self.recovery.diagnostics.len() > 200 {
+                let excess = self.recovery.diagnostics.len() - 200;
+                self.recovery.diagnostics.drain(..excess);
             }
             self.storage_message = Some(format!(
                 "Saved {completed} of {} note(s); {} failed. Details are in Recovery > Diagnostics.",
@@ -415,7 +416,7 @@ impl WidgetApp {
                     .or_else(|| Some(reason.to_owned()));
                 self.external_conflict = false;
                 self.external_changed_paths.clear();
-                self.diagnostics = warnings;
+                self.recovery.diagnostics = warnings;
                 self.save_settings();
             }
             Err(error) => self.storage_message = Some(format!("Failed to reload vault: {error}")),
@@ -490,7 +491,7 @@ impl WidgetApp {
                         );
                         self.data.notes = notes;
                         self.folder_paths = folders;
-                        self.diagnostics.extend(warnings);
+                        self.recovery.diagnostics.extend(warnings);
                         self.link_index =
                             LinkIndex::build(&self.data.notes, &self.storage_paths.notes_dir);
                         self.tag_index = TagIndex::build(&self.data.notes);
