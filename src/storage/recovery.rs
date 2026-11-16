@@ -7,9 +7,8 @@ pub fn save_note_with_backup(
 ) -> StorageResult<()> {
     if note.file_path.exists() && backup_limit > 0 {
         fs::create_dir_all(backups_dir)?;
-        let timestamp = Local::now().format("%Y%m%d-%H%M%S-%3f");
-        let backup = backups_dir.join(format!("{}-{timestamp}.md", note.id));
-        fs::copy(&note.file_path, backup)?;
+        let timestamp = Local::now().format("%Y%m%d-%H%M%S-%3f").to_string();
+        write_backup(&note.file_path, backups_dir, note.id, &timestamp)?;
         prune_backups(backups_dir, note.id, backup_limit)?;
     }
     save_note(note)
@@ -314,6 +313,29 @@ pub fn restore_from_trash(paths: &StoragePaths, relative: &Path) -> StorageResul
     Ok(destination)
 }
 
+/// Writes a backup copy of `source` and returns its path.
+///
+/// The copy is written as a new ordinary file instead of `fs::copy`, which would carry
+/// a read-only attribute over to the backup. Two saves within the same millisecond
+/// (for example a retry right after a failed save) get distinct names instead of
+/// colliding with that earlier, possibly read-only, backup.
+fn write_backup(
+    source: &Path,
+    backups_dir: &Path,
+    note_id: Uuid,
+    timestamp: &str,
+) -> StorageResult<PathBuf> {
+    let bytes = fs::read(source)?;
+    let mut backup = backups_dir.join(format!("{note_id}-{timestamp}.md"));
+    let mut attempt = 1;
+    while backup.exists() {
+        backup = backups_dir.join(format!("{note_id}-{timestamp}-{attempt}.md"));
+        attempt += 1;
+    }
+    fs::write(&backup, bytes)?;
+    Ok(backup)
+}
+
 fn prune_backups(backups_dir: &Path, note_id: Uuid, limit: usize) -> StorageResult<()> {
     let prefix = format!("{note_id}-");
     let mut backups = fs::read_dir(backups_dir)?
@@ -341,5 +363,41 @@ fn display_note_title(note: &Note) -> &str {
             .unwrap_or("Untitled")
     } else {
         note.title.as_str()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backups_of_read_only_notes_never_collide_or_stay_read_only() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let source = temp.path().join("note.md");
+        fs::write(&source, "content").expect("write note");
+        let mut permissions = fs::metadata(&source).expect("metadata").permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&source, permissions).expect("make read-only");
+        let backups = temp.path().join("Backups");
+        fs::create_dir_all(&backups).expect("backups dir");
+        let id = Uuid::new_v4();
+
+        let first = write_backup(&source, &backups, id, "20260101-000000-000").expect("first");
+        let second = write_backup(&source, &backups, id, "20260101-000000-000").expect("second");
+
+        assert_ne!(first, second);
+        for backup in [first, second] {
+            assert_eq!(fs::read_to_string(&backup).expect("read backup"), "content");
+            assert!(
+                !fs::metadata(&backup)
+                    .expect("metadata")
+                    .permissions()
+                    .readonly()
+            );
+        }
+        let mut permissions = fs::metadata(&source).expect("metadata").permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        fs::set_permissions(&source, permissions).expect("restore permissions");
     }
 }
